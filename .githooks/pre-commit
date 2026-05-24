@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: cargo is required for pre-commit checks" >&2
+  exit 1
+fi
+
+echo "==> cargo fmt --check"
+cargo fmt --check
+
+echo "==> cargo clippy -- -D warnings"
+cargo clippy -- -D warnings
+
+if [[ "${SKIP_TESTS:-0}" == "1" ]]; then
+  echo "==> skipping cargo test because SKIP_TESTS=1"
+else
+  echo "==> cargo test"
+  cargo test
+fi
+
+echo "pre-commit checks passed"
