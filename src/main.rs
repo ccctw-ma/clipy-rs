@@ -205,6 +205,7 @@ fn cmd_clear(store: &Store, args: &[String]) -> Result<(), String> {
         return Err("clear refuses to run without --yes".to_string());
     }
     store.save_history(&[])?;
+    store.save_rich_history(&[])?;
     println!("cleared history");
     Ok(())
 }
@@ -217,7 +218,9 @@ fn cmd_snippet(store: &Store, args: &[String]) -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str() {
         "add" => snippet_add(store, &args),
+        "save" | "from-clipboard" => snippet_save_clipboard(store, &args),
         "list" | "ls" => snippet_list(store, &args),
+        "pick" => snippet_pick(store, &args),
         "copy" => snippet_copy(store, &args),
         "remove" | "rm" => snippet_remove(store, &args),
         unknown => Err(format!("unknown snippet command `{unknown}`")),
@@ -241,73 +244,87 @@ fn snippet_add(store: &Store, args: &[String]) -> Result<(), String> {
     }
 
     let mut snippets = store.load_snippets()?;
-    let now = storage::now_millis();
-    if let Some(existing) = snippets.iter_mut().find(|snippet| snippet.name == *name) {
-        existing.content = text;
-        existing.updated_at = now;
-    } else {
-        snippets.push(SnippetEntry {
-            name: name.to_string(),
-            content: text,
-            created_at: now,
-            updated_at: now,
-            use_count: 0,
-        });
-    }
-    snippets.sort_by_key(|snippet| Reverse(snippet.updated_at));
+    storage::upsert_snippet(&mut snippets, name.to_string(), text);
     store.save_snippets(&snippets)?;
     println!("saved snippet `{name}`");
+    Ok(())
+}
+
+fn snippet_save_clipboard(store: &Store, args: &[String]) -> Result<(), String> {
+    let name = first_positional(args, &[])
+        .ok_or_else(|| "snip save requires <name>".to_string())?
+        .trim();
+    if name.is_empty() {
+        return Err("snippet name cannot be empty".to_string());
+    }
+
+    let text = clipboard::read_text()?;
+    if text.is_empty() {
+        return Err("clipboard text is empty".to_string());
+    }
+
+    let mut snippets = store.load_snippets()?;
+    storage::upsert_snippet(&mut snippets, name.to_string(), text);
+    store.save_snippets(&snippets)?;
+    println!("saved clipboard as snippet `{name}`");
     Ok(())
 }
 
 fn snippet_list(store: &Store, args: &[String]) -> Result<(), String> {
     let query = free_text(args, &["--limit"]);
     let limit = parse_usize_flag(args, "--limit")?;
-    let mut snippets = store.load_snippets()?;
-    snippets.sort_by_key(|snippet| Reverse(snippet.updated_at));
-    if let Some(query) = query {
-        let needle = query.to_lowercase();
-        snippets.retain(|snippet| {
-            snippet.name.to_lowercase().contains(&needle)
-                || snippet.content.to_lowercase().contains(&needle)
-        });
-    }
+    let snippets = filter_snippets(store.load_snippets()?, query.as_deref());
     if snippets.is_empty() {
         println!("no snippets");
         return Ok(());
     }
+    print_snippets(&snippets, limit);
+    Ok(())
+}
+
+fn snippet_pick(store: &Store, args: &[String]) -> Result<(), String> {
+    let paste = has_flag(args, "--paste");
+    let query = free_text(args, &["--paste"]);
+    let snippets = filter_snippets(store.load_snippets()?, query.as_deref());
+    if snippets.is_empty() {
+        println!("no matching snippets");
+        return Ok(());
+    }
+
+    print_snippets(&snippets, Some(20));
+    let index = prompt_index("copy which snippet? ")?;
+    let snippet = snippets
+        .get(index.saturating_sub(1))
+        .ok_or_else(|| format!("selection {index} is out of range"))?;
+    copy_snippet_by_name(store, &snippet.name, paste)?;
+    println!("copied snippet `{}`", snippet.name);
+    Ok(())
+}
+
+fn print_snippets(snippets: &[SnippetEntry], limit: Option<usize>) {
     for (idx, snippet) in snippets
         .iter()
         .take(limit.unwrap_or(usize::MAX))
         .enumerate()
     {
         println!(
-            "{:>3}. {:<24} {}",
+            "{:>3}. {:<24} uses={:<3} {}",
             idx + 1,
             snippet.name,
+            snippet.use_count,
             preview(&snippet.content, 80)
         );
     }
-    Ok(())
 }
 
 fn snippet_copy(store: &Store, args: &[String]) -> Result<(), String> {
     let paste = has_flag(args, "--paste");
-    let name = first_positional(args, &["--paste"])
-        .ok_or_else(|| "snip copy requires <name>".to_string())?;
-    let mut snippets = store.load_snippets()?;
-    let snippet = snippets
-        .iter_mut()
-        .find(|snippet| snippet.name == name)
-        .ok_or_else(|| format!("snippet `{name}` was not found"))?;
-    clipboard::write_text(&snippet.content)?;
-    snippet.use_count += 1;
-    snippet.updated_at = storage::now_millis();
-    store.save_snippets(&snippets)?;
-    if paste {
-        clipboard::paste_frontmost()?;
-    }
-    println!("copied snippet `{name}`");
+    let key = first_positional(args, &["--paste"])
+        .ok_or_else(|| "snip copy requires a name, list index, or search query".to_string())?;
+    let snippets = sorted_snippets(store.load_snippets()?);
+    let snippet = resolve_snippet(&snippets, key)?;
+    copy_snippet_by_name(store, &snippet.name, paste)?;
+    println!("copied snippet `{}`", snippet.name);
     Ok(())
 }
 
@@ -325,9 +342,11 @@ fn snippet_remove(store: &Store, args: &[String]) -> Result<(), String> {
 
 fn cmd_stats(store: &Store) -> Result<(), String> {
     let history = store.load_history()?;
+    let rich_history = store.load_rich_history()?;
     let snippets = store.load_snippets()?;
     let bytes: usize = history.iter().map(|entry| entry.content.len()).sum();
     println!("history items: {}", history.len());
+    println!("image/file history items: {}", rich_history.len());
     println!("history bytes: {bytes}");
     println!("snippets: {}", snippets.len());
     println!("data dir: {}", store.root().display());
@@ -375,18 +394,36 @@ fn capture_text(
 
 fn copy_history_entry(store: &Store, id: u64, paste: bool) -> Result<(), String> {
     let mut entries = store.load_history()?;
-    let entry = entries
-        .iter_mut()
-        .find(|entry| entry.id == id)
+    let entry_index = entries
+        .iter()
+        .position(|entry| entry.id == id)
         .ok_or_else(|| format!("history item `{id}` was not found"))?;
-    clipboard::write_text(&entry.content)?;
-    entry.use_count += 1;
-    entry.updated_at = storage::now_millis();
-    store.save_history(&entries)?;
+    clipboard::write_text(&entries[entry_index].content)?;
     if paste {
         clipboard::paste_frontmost()?;
     }
+    entries[entry_index].use_count += 1;
+    entries[entry_index].updated_at = storage::now_millis();
+    store.save_history(&entries)?;
     println!("copied history item {id}");
+    Ok(())
+}
+
+fn copy_snippet_by_name(store: &Store, name: &str, paste: bool) -> Result<(), String> {
+    let mut snippets = store.load_snippets()?;
+    let snippet_index = snippets
+        .iter()
+        .position(|snippet| snippet.name == name)
+        .ok_or_else(|| format!("snippet `{name}` was not found"))?;
+    let rendered = render_snippet_content(&snippets[snippet_index].content)?;
+    clipboard::write_text(&rendered.content)?;
+    if paste {
+        clipboard::paste_frontmost()?;
+        clipboard::move_cursor_left(rendered.cursor_left)?;
+    }
+    snippets[snippet_index].use_count += 1;
+    snippets[snippet_index].updated_at = storage::now_millis();
+    store.save_snippets(&snippets)?;
     Ok(())
 }
 
@@ -399,6 +436,119 @@ fn sorted_history(mut entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
             .then_with(|| right.id.cmp(&left.id))
     });
     entries
+}
+
+fn sorted_snippets(mut snippets: Vec<SnippetEntry>) -> Vec<SnippetEntry> {
+    snippets.sort_by_key(|snippet| Reverse(snippet.updated_at));
+    snippets
+}
+
+fn filter_snippets(snippets: Vec<SnippetEntry>, query: Option<&str>) -> Vec<SnippetEntry> {
+    let mut snippets = sorted_snippets(snippets);
+    if let Some(query) = query {
+        let needle = query.to_lowercase();
+        snippets.retain(|snippet| snippet_matches_query(snippet, &needle));
+    }
+    snippets
+}
+
+fn resolve_snippet<'a>(
+    snippets: &'a [SnippetEntry],
+    key: &str,
+) -> Result<&'a SnippetEntry, String> {
+    if let Ok(index) = key.parse::<usize>()
+        && index > 0
+        && let Some(snippet) = snippets.get(index - 1)
+    {
+        return Ok(snippet);
+    }
+
+    if let Some(snippet) = snippets.iter().find(|snippet| snippet.name == key) {
+        return Ok(snippet);
+    }
+
+    let leaf_matches = snippets
+        .iter()
+        .filter(|snippet| snippet_display_name(&snippet.name) == key)
+        .collect::<Vec<_>>();
+    match leaf_matches.as_slice() {
+        [snippet] => return Ok(*snippet),
+        [] => {}
+        _ => {
+            return Err(format!(
+                "snippet `{key}` matched {} folders; use the full name or copy by index",
+                leaf_matches.len()
+            ));
+        }
+    }
+
+    let needle = key.to_lowercase();
+    let matches = snippets
+        .iter()
+        .filter(|snippet| snippet_matches_query(snippet, &needle))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [snippet] => Ok(*snippet),
+        [] => Err(format!("snippet `{key}` was not found")),
+        _ => Err(format!(
+            "snippet `{key}` matched {} items; use `snip list {key}` and copy by index",
+            matches.len()
+        )),
+    }
+}
+
+fn snippet_matches_query(snippet: &SnippetEntry, needle: &str) -> bool {
+    snippet.name.to_lowercase().contains(needle)
+        || snippet_display_name(&snippet.name)
+            .to_lowercase()
+            .contains(needle)
+        || snippet.content.to_lowercase().contains(needle)
+}
+
+fn snippet_display_name(name: &str) -> &str {
+    let name = name.trim_matches('/');
+    name.rsplit('/').next().unwrap_or(name)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RenderedSnippet {
+    content: String,
+    cursor_left: usize,
+}
+
+fn render_snippet_content(content: &str) -> Result<RenderedSnippet, String> {
+    let clipboard_text = if content.contains("{{clipboard}}") {
+        Some(clipboard::read_text()?)
+    } else {
+        None
+    };
+    Ok(render_snippet_content_with_clipboard(
+        content,
+        clipboard_text.as_deref(),
+    ))
+}
+
+fn render_snippet_content_with_clipboard(
+    content: &str,
+    clipboard_text: Option<&str>,
+) -> RenderedSnippet {
+    let mut content = content.replace("{{clipboard}}", clipboard_text.unwrap_or_default());
+    let cursor_marker = earliest_marker(&content, &["{{cursor}}", "$|$"]);
+    let cursor_left = cursor_marker
+        .map(|(index, marker)| content[index + marker.len()..].chars().count())
+        .unwrap_or(0);
+    content = content.replace("{{cursor}}", "").replace("$|$", "");
+    RenderedSnippet {
+        content,
+        cursor_left,
+    }
+}
+
+fn earliest_marker<'a>(text: &str, markers: &[&'a str]) -> Option<(usize, &'a str)> {
+    markers
+        .iter()
+        .filter_map(|marker| text.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)
 }
 
 fn filter_history(entries: Vec<HistoryEntry>, query: Option<&str>) -> Vec<HistoryEntry> {
@@ -648,8 +798,10 @@ USAGE
   clipy-rs remove <index>
   clipy-rs clear --yes
   clipy-rs snip add <name> <text>
+  clipy-rs snip save <name>
   clipy-rs snip list [query]
-  clipy-rs snip copy <name> [--paste]
+  clipy-rs snip pick [query] [--paste]
+  clipy-rs snip copy <name|index|query> [--paste]
   clipy-rs snip remove <name>
   clipy-rs stats
   clipy-rs path
@@ -657,7 +809,8 @@ USAGE
 NOTES
   - Data is stored locally under ~/Library/Application Support/clipy-rs.
   - watch/capture skip obvious secrets by default; pass --allow-sensitive to store them.
-  - --paste uses macOS Accessibility via osascript and may need system permission.
+  - Snippet names can use folders like work/signature; snippets support {{clipboard}} and {{cursor}}.
+  - --paste posts Cmd+V through macOS Accessibility and may need system permission.
 "#
     );
 }
@@ -683,5 +836,44 @@ mod tests {
             free_text(&args, &["--limit"]),
             Some("hello world".to_string())
         );
+    }
+
+    #[test]
+    fn resolves_snippet_by_index_exact_name_and_unique_query() {
+        let snippets = vec![
+            SnippetEntry {
+                name: "work/signature".to_string(),
+                content: "Regards".to_string(),
+                created_at: 1,
+                updated_at: 3,
+                use_count: 0,
+            },
+            SnippetEntry {
+                name: "email".to_string(),
+                content: "hello@example.com".to_string(),
+                created_at: 1,
+                updated_at: 2,
+                use_count: 0,
+            },
+        ];
+
+        assert_eq!(
+            resolve_snippet(&snippets, "1").unwrap().name,
+            "work/signature"
+        );
+        assert_eq!(
+            resolve_snippet(&snippets, "signature").unwrap().name,
+            "work/signature"
+        );
+        assert_eq!(resolve_snippet(&snippets, "hello@").unwrap().name, "email");
+    }
+
+    #[test]
+    fn renders_snippet_clipboard_and_cursor_markers() {
+        let rendered =
+            render_snippet_content_with_clipboard("wrap({{clipboard}}){{cursor}};", Some("value"));
+
+        assert_eq!(rendered.content, "wrap(value);");
+        assert_eq!(rendered.cursor_left, 1);
     }
 }

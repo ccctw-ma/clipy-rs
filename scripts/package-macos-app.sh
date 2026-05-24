@@ -64,8 +64,6 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
-  <key>NSAppleEventsUsageDescription</key>
-  <string>Clipy RS uses System Events to paste selected clipboard history into the frontmost app.</string>
 </dict>
 </plist>
 PLIST

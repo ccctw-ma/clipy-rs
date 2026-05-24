@@ -3,20 +3,23 @@
 [English README](README.md)
 
 `clipy-rs` 是一个用 Rust 编写的 macOS 剪贴板历史工具，灵感来自
-Clipy 的核心工作流：记录文本剪贴板历史、搜索历史、复制旧内容，以及维护可复用的文本片段。
+Clipy 的核心工作流：记录文本、图片和文件引用剪贴板历史、搜索历史、复制旧内容，以及维护可复用的文本片段。
 
-它同时提供原生 macOS 菜单栏应用和命令行界面。剪贴板读写基于 macOS
-的 `pbpaste` 和 `pbcopy`，GUI 通过 Rust 绑定使用 AppKit 和 Carbon。
+它同时提供原生 macOS 菜单栏应用和命令行界面。剪贴板读写基于 AppKit
+的 `NSPasteboard`，粘贴集成通过 CoreGraphics 和 macOS 辅助功能发送键盘事件。
 
 ## 功能
 
 - 记录文本剪贴板历史。
+- 在菜单栏应用中记录图片和文件剪贴板格式。
 - 列表查看、搜索、置顶、删除和清空历史项。
 - 将历史项重新复制回系统剪贴板。
 - 复制后可选自动向当前前台应用发送 Cmd+V。
 - 管理可复用文本片段。
 - 提供原生 macOS 菜单栏 GUI。
 - 支持全局快捷键 `Cmd+Shift+V` 呼出菜单。
+- 提供设置子菜单，用于配置语言和剪贴板格式选项。
+- 支持菜单栏 UI 在英文和中文之间切换。
 - 默认在 capture 和 watch 时跳过明显的敏感内容。
 - 数据本地存储在 `~/Library/Application Support/clipy-rs`。
 
@@ -74,7 +77,12 @@ clipy-rs gui
 clipy-rs gui
 ```
 
-状态栏标题是 `Clip`。菜单包含最近剪贴板历史、文本片段、手动捕获、刷新、清空历史、打开数据目录和退出。
+状态栏标题是 `Clip`。菜单包含最近文本历史、图片/文件历史、文本片段、设置、手动捕获、刷新、清空历史、打开数据目录和退出。
+
+设置子菜单支持：
+
+- 在 English 和 Chinese 之间切换语言
+- 开启或关闭图片/文件剪贴板捕获
 
 全局快捷键：
 
@@ -119,10 +127,17 @@ clipy-rs copy 1 --paste
 
 ```sh
 clipy-rs snip add email "hello@example.com"
+clipy-rs snip add work/signature "Regards,"
+clipy-rs snip save copied-note
 clipy-rs snip list
-clipy-rs snip copy email
+clipy-rs snip pick sig --paste
+clipy-rs snip copy email --paste
 clipy-rs snip remove email
 ```
+
+片段名称可以用 `/` 形成菜单分组，例如 `work/signature`。片段内容支持
+`{{clipboard}}` 插入粘贴前的当前剪贴板文本，也支持 `{{cursor}}` 或 `$|$`
+控制插入后的光标位置。
 
 查看本地数据目录：
 
@@ -130,7 +145,7 @@ clipy-rs snip remove email
 clipy-rs path
 ```
 
-`--paste` 和 GUI 菜单选择会使用 AppleScript/System Events，因此 macOS 可能要求你给 Terminal、iTerm 或启动该工具的应用授予辅助功能权限。
+`--paste` 和 GUI 菜单选择会发送 Cmd+V 键盘事件，因此 macOS 可能要求你给 Terminal、iTerm 或启动该工具的应用授予辅助功能权限。
 
 ## 数据和隐私
 
@@ -153,6 +168,13 @@ clipy-rs watch --allow-sensitive
 
 ```text
 ~/Library/Application Support/clipy-rs/snippets.bin
+```
+
+图片/文件剪贴板历史和应用设置也存储在同一目录：
+
+```text
+~/Library/Application Support/clipy-rs/rich_history.bin
+~/Library/Application Support/clipy-rs/settings.conf
 ```
 
 通过环境变量覆盖数据目录：
@@ -349,9 +371,11 @@ $HOME/.cargo/bin/clipy-rs gui
 - 置顶、删除、清空操作
 - 菜单栏 GUI
 - 全局快捷键弹出菜单
+- 设置子菜单
+- 英文/中文语言切换
+- GUI 中的图片/文件剪贴板格式
 
 尚未实现：
 
 - 应用排除规则
-- 图片/文件剪贴板格式
 - iCloud 同步
