@@ -3,8 +3,8 @@
 [中文文档](README.zh-CN.md)
 
 `clipy-rs` is a small macOS clipboard history tool written in Rust, inspired by
-Clipy's core workflow: record clipboard text, search history, copy previous
-items back, and keep reusable snippets.
+Clipy's core workflow: record clipboard text, images, and file references,
+search history, copy previous items back, and keep reusable snippets.
 
 It provides both a native macOS menu bar app and a command-line interface. The
 clipboard read/write path uses macOS `pbpaste` and `pbcopy`; the GUI uses AppKit
@@ -13,12 +13,15 @@ and Carbon through Rust bindings.
 ## Features
 
 - Records text clipboard history.
+- Records image and file clipboard formats in the menu bar app.
 - Lists, searches, pins, removes, and clears history items.
 - Copies a previous history item back to the system clipboard.
 - Optionally sends Cmd+V to the frontmost app after copying.
 - Manages reusable text snippets.
 - Provides a native macOS menu bar GUI.
 - Shows the menu with the global hotkey `Cmd+Shift+V`.
+- Provides a Settings submenu for language and clipboard-format options.
+- Switches the menu bar UI between English and Chinese.
 - Skips obvious secrets by default during capture and watch.
 - Stores data locally under `~/Library/Application Support/clipy-rs`.
 
@@ -77,9 +80,14 @@ Start the menu bar GUI:
 clipy-rs gui
 ```
 
-The status bar item is titled `Clip`. Its menu includes recent clipboard
-history, snippets, manual capture, refresh, clear history, data-directory open,
-and quit actions.
+The status bar item is titled `Clip`. Its menu includes recent text history,
+image/file history, snippets, settings, manual capture, refresh, clear history,
+data-directory open, and quit actions.
+
+The Settings submenu supports:
+
+- language switching between English and Chinese
+- enabling or disabling image/file clipboard capture
 
 The global hotkey is:
 
@@ -162,6 +170,13 @@ Snippets are stored next to it:
 
 ```text
 ~/Library/Application Support/clipy-rs/snippets.bin
+```
+
+Image/file clipboard history and app settings are stored next to them:
+
+```text
+~/Library/Application Support/clipy-rs/rich_history.bin
+~/Library/Application Support/clipy-rs/settings.conf
 ```
 
 Override the data directory with:
@@ -368,9 +383,11 @@ Implemented in this Rust version:
 - pin/remove/clear operations
 - menu bar GUI
 - global hotkey popup
+- settings submenu
+- English/Chinese language switching
+- image/file clipboard formats in the GUI
 
 Not implemented yet:
 
 - app exclusion rules
-- image/file clipboard formats
 - iCloud sync

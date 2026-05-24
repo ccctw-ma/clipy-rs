@@ -205,6 +205,7 @@ fn cmd_clear(store: &Store, args: &[String]) -> Result<(), String> {
         return Err("clear refuses to run without --yes".to_string());
     }
     store.save_history(&[])?;
+    store.save_rich_history(&[])?;
     println!("cleared history");
     Ok(())
 }
@@ -325,9 +326,11 @@ fn snippet_remove(store: &Store, args: &[String]) -> Result<(), String> {
 
 fn cmd_stats(store: &Store) -> Result<(), String> {
     let history = store.load_history()?;
+    let rich_history = store.load_rich_history()?;
     let snippets = store.load_snippets()?;
     let bytes: usize = history.iter().map(|entry| entry.content.len()).sum();
     println!("history items: {}", history.len());
+    println!("image/file history items: {}", rich_history.len());
     println!("history bytes: {bytes}");
     println!("snippets: {}", snippets.len());
     println!("data dir: {}", store.root().display());

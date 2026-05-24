@@ -8,23 +8,32 @@ license = "MIT"
 [dependencies]
 objc2 = { version = "0.6.3" }
 objc2-app-kit = { version = "0.3.2", features = [
+    "NSAlert",
     "objc2-core-foundation",
     "NSButton",
     "NSControl",
     "NSApplication",
+    "NSEvent",
     "NSMenu",
     "NSMenuItem",
+    "NSPasteboard",
+    "NSPopUpButton",
     "NSResponder",
     "NSRunningApplication",
+    "NSScreen",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSTextField",
     "NSView",
 ] }
 objc2-foundation = { version = "0.3.2", features = [
+    "NSArray",
+    "NSData",
     "NSDate",
     "NSNotification",
     "NSObject",
     "NSString",
     "NSTimer",
+    "NSURL",
 ] }
