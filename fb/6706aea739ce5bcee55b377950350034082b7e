@@ -1,0 +1,187 @@
+README.md
+  0d882ae838a47fc8 36-96 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a128aa3b348d1398bb8e72c","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[36,96]}]}]}
+scripts/package-macos-dmg.sh
+  0d882ae838a47fc8 1-41 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a128aa3b348d1398bb8e72c","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[1,41]}]}]}
+scripts/package-macos-release.sh
+  0d882ae838a47fc8 1-101 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a128aa3b348d1398bb8e72c","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[1,101]}]}]}
+scripts/package-macos-app.sh
+  0d882ae838a47fc8 1-75 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a128aa3b348d1398bb8e72c","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[1,75]}]}]}
+src/main.rs
+  0d882ae838a47fc8 1-687 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a128aa3b348d1398bb8e72c","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Range":[1,687]}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "fb6706aea739ce5bcee55b377950350034082b7e",
+  "prompts": {
+    "0d882ae838a47fc8": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a127a55b348d1398bb8e660",
+        "model": "gpt-5.5__dev"
+      },
+      "human_author": "mashichen <mashichen.msc@bytedance.com>",
+      "messages": [],
+      "total_additions": 975,
+      "total_deletions": 10,
+      "accepted_lines": 965,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "README.md": [
+      {
+        "hash": "0d882ae838a47fc8",
+        "line_ranges": [
+          {
+            "Range": [
+              36,
+              96
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a128aa3b348d1398bb8e72c",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  36,
+                  96
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "scripts/package-macos-app.sh": [
+      {
+        "hash": "0d882ae838a47fc8",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              75
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a128aa3b348d1398bb8e72c",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  75
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "scripts/package-macos-dmg.sh": [
+      {
+        "hash": "0d882ae838a47fc8",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              41
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a128aa3b348d1398bb8e72c",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  41
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "scripts/package-macos-release.sh": [
+      {
+        "hash": "0d882ae838a47fc8",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              101
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a128aa3b348d1398bb8e72c",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  101
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "src/main.rs": [
+      {
+        "hash": "0d882ae838a47fc8",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              687
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a128aa3b348d1398bb8e72c",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  687
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "0d882ae838a47fc8": {
+      "tool": "trae",
+      "conversation_id": "6a127a55b348d1398bb8e660",
+      "session_id": "6a127a55b348d1398bb8e660",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
