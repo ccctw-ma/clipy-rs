@@ -1,9 +1,10 @@
 use std::ffi::{CStr, c_void};
-#[cfg(not(target_os = "macos"))]
 use std::io::Write;
 #[cfg(not(target_os = "macos"))]
 use std::process::{Command, Stdio};
 use std::ptr::NonNull;
+
+use crate::storage::{RichClipboardFlavor, RichClipboardKind, RichHistoryEntry};
 
 use crate::storage::{RichClipboardFlavor, RichClipboardKind, RichHistoryEntry};
 
@@ -160,23 +161,6 @@ pub fn write_rich_clipboard(_entry: &RichHistoryEntry) -> Result<(), String> {
     Err("rich clipboard support is only available on macOS".to_string())
 }
 
-#[cfg(target_os = "macos")]
-pub fn write_text(text: &str) -> Result<(), String> {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-    use objc2_foundation::NSString;
-
-    let pasteboard = NSPasteboard::generalPasteboard();
-    pasteboard.clearContents();
-    let text = NSString::from_str(text);
-    let text_type = unsafe { NSPasteboardTypeString };
-    if pasteboard.setString_forType(&text, text_type) {
-        Ok(())
-    } else {
-        Err("failed to write clipboard text".to_string())
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
 pub fn write_text(text: &str) -> Result<(), String> {
     let mut child = Command::new("pbcopy")
         .stdin(Stdio::piped())
@@ -306,6 +290,107 @@ unsafe extern "C" {
 unsafe fn release_if_present(value: *mut c_void) {
     if !value.is_null() {
         unsafe { CFRelease(value.cast_const()) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nsstring_to_string(value: &objc2_foundation::NSString) -> String {
+    let ptr = value.UTF8String();
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nsdata_to_vec(data: &objc2_foundation::NSData) -> Result<Vec<u8>, String> {
+    let len = data.length();
+    let mut bytes = vec![0u8; len];
+    if len == 0 {
+        return Ok(bytes);
+    }
+    let ptr = NonNull::new(bytes.as_mut_ptr().cast::<c_void>())
+        .ok_or_else(|| "failed to allocate clipboard data buffer".to_string())?;
+    unsafe {
+        data.getBytes_length(ptr, len as _);
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn nsstring_array(
+    values: &[objc2::rc::Retained<objc2_foundation::NSString>],
+) -> objc2::rc::Retained<objc2_foundation::NSArray<objc2_foundation::NSString>> {
+    use objc2::AnyThread;
+    use objc2_foundation::NSArray;
+
+    let mut objects: Vec<NonNull<objc2_foundation::NSString>> = values
+        .iter()
+        .map(|value| NonNull::from(value.as_ref()))
+        .collect();
+    unsafe {
+        NSArray::initWithObjects_count(NSArray::alloc(), objects.as_mut_ptr(), objects.len() as _)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_image_type(name: &str) -> bool {
+    matches!(
+        name,
+        "public.png"
+            | "public.tiff"
+            | "com.adobe.pdf"
+            | "Apple PNG pasteboard type"
+            | "NeXT TIFF v4.0 pasteboard type"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn is_file_type(name: &str) -> bool {
+    matches!(name, "public.file-url" | "NSFilenamesPboardType")
+}
+
+#[cfg(target_os = "macos")]
+fn is_supported_rich_type(kind: RichClipboardKind, name: &str) -> bool {
+    match kind {
+        RichClipboardKind::Image => is_image_type(name),
+        RichClipboardKind::File => is_file_type(name) || name == "public.utf8-plain-text",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rich_label(
+    kind: RichClipboardKind,
+    pasteboard: &objc2_app_kit::NSPasteboard,
+    flavors: &[RichClipboardFlavor],
+) -> String {
+    match kind {
+        RichClipboardKind::Image => {
+            let bytes: usize = flavors.iter().map(|flavor| flavor.data.len()).sum();
+            format!("Image clipboard ({})", human_bytes(bytes))
+        }
+        RichClipboardKind::File => {
+            let file_type = objc2_foundation::NSString::from_str("public.file-url");
+            if let Some(value) = pasteboard.stringForType(&file_type) {
+                format!("File clipboard: {}", nsstring_to_string(&value))
+            } else {
+                "File clipboard".to_string()
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn human_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}M", bytes as f64 / 1024.0 / 1024.0)
     }
 }
 

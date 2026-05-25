@@ -18,15 +18,18 @@ use objc2_foundation::{
 
 use crate::clipboard;
 use crate::sensitive;
-use crate::storage::{self, AppSettings, HistoryEntry, Language, RichHistoryEntry, Store};
+use crate::storage::{
+    self, AppSettings, HistoryEntry, Language, RichHistoryEntry, SnippetEntry, Store,
+};
 
 const CAPTURE_MAX_BYTES: usize = 256 * 1024;
 const CAPTURE_MAX_RICH_BYTES: usize = 10 * 1024 * 1024;
 const MIN_PREVIEW_UNITS: usize = 6;
-const MENU_WIDTH_TEXT_PADDING: usize = 56;
-const MENU_WIDTH_UNIT_PIXELS: usize = 5;
+const MENU_WIDTH_TEXT_PADDING: usize = 76;
+const MENU_WIDTH_UNIT_PIXELS: usize = 8;
 const ELLIPSIS: &str = "...";
 const ELLIPSIS_UNITS: usize = 3;
+const SNIPPET_SEPARATOR: &str = " - ";
 const MENU_ITEM_HEIGHT_ESTIMATE: f64 = 22.0;
 const MENU_VERTICAL_PADDING_ESTIMATE: f64 = 16.0;
 const MENU_SCREEN_MARGIN: f64 = 8.0;
@@ -176,6 +179,23 @@ define_class!(
             self.rebuild_menu();
         }
 
+        #[unsafe(method(copySnippetItem:))]
+        fn copy_snippet_item(&self, sender: &NSMenuItem) {
+            let index = sender.tag();
+            if index <= 0 {
+                self.set_error("invalid snippet index".to_string());
+                return;
+            }
+
+            if let Some(store) = self.store() {
+                match copy_rich_history_entry(store, id as u64, true) {
+                    Ok(()) => self.clear_error(),
+                    Err(err) => self.set_error(err),
+                }
+            }
+            self.rebuild_menu();
+        }
+
         #[unsafe(method(clearHistory:))]
         fn clear_history(&self, _sender: &NSMenuItem) {
             if let Some(store) = self.store() {
@@ -235,6 +255,28 @@ define_class!(
                 Ok(status) => self.set_error(format!("failed to open Notes: {status}")),
                 Err(err) => self.set_error(format!("failed to open Notes: {err}")),
             }
+        }
+
+        #[unsafe(method(setLanguageEnglish:))]
+        fn set_language_english(&self, _sender: &NSMenuItem) {
+            self.update_settings(|settings| settings.language = Language::English);
+        }
+
+        #[unsafe(method(setLanguageChinese:))]
+        fn set_language_chinese(&self, _sender: &NSMenuItem) {
+            self.update_settings(|settings| settings.language = Language::Chinese);
+        }
+
+        #[unsafe(method(toggleRichClipboard:))]
+        fn toggle_rich_clipboard(&self, _sender: &NSMenuItem) {
+            self.update_settings(|settings| {
+                settings.capture_rich_clipboard = !settings.capture_rich_clipboard
+            });
+        }
+
+        #[unsafe(method(openPreferences:))]
+        fn open_preferences(&self, _sender: &NSMenuItem) {
+            self.show_preferences_panel();
         }
 
         #[unsafe(method(showClipyMenu:))]
@@ -456,13 +498,13 @@ impl MenuDelegate {
         }
 
         menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-        self.add_favorites_menu(menu, lang);
         self.add_rich_history_menu(menu, lang);
-        self.add_action_item(menu, t(lang, "notes"), sel!(openNotes:), 0);
+        self.add_snippets_menu(menu, lang);
         menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
 
         self.add_action_item(menu, t(lang, "preferences"), sel!(openPreferences:), 0);
         self.add_action_item(menu, t(lang, "clear_history"), sel!(clearHistory:), 0);
+        self.add_action_item(menu, t(lang, "open_data_dir"), sel!(openDataDirectory:), 0);
         self.add_action_item(menu, t(lang, "quit"), sel!(quit:), 0);
     }
 
@@ -526,113 +568,6 @@ impl MenuDelegate {
         }
     }
 
-    fn add_favorites_menu(&self, menu: &NSMenu, lang: Language) {
-        let settings = self.settings();
-        let submenu_item = self.new_menu_item(t(lang, "favorites"));
-        let submenu = NSMenu::initWithTitle(
-            NSMenu::alloc(self.mtm()),
-            &NSString::from_str(t(lang, "favorites")),
-        );
-        self.configure_menu_appearance(&submenu);
-
-        if let Some(store) = self.store() {
-            let entries = sorted_history(store.load_history().unwrap_or_default());
-            let favorites = entries
-                .iter()
-                .filter(|entry| entry.pinned)
-                .take(settings.max_history_items)
-                .collect::<Vec<_>>();
-            let candidates = entries
-                .iter()
-                .filter(|entry| !entry.pinned)
-                .take(settings.max_history_items)
-                .collect::<Vec<_>>();
-
-            if favorites.is_empty() {
-                self.add_disabled_item(&submenu, t(lang, "no_favorites"));
-            } else {
-                for (idx, entry) in favorites.iter().enumerate() {
-                    self.add_history_reference_item(
-                        &submenu,
-                        idx,
-                        entry,
-                        sel!(copyHistoryItem:),
-                        settings.menu_width,
-                    );
-                }
-            }
-
-            submenu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-            self.add_history_toggle_submenu(
-                &submenu,
-                t(lang, "add_favorite"),
-                &candidates,
-                t(lang, "no_favorite_candidates"),
-                settings.menu_width,
-            );
-            self.add_history_toggle_submenu(
-                &submenu,
-                t(lang, "remove_favorite"),
-                &favorites,
-                t(lang, "no_favorites"),
-                settings.menu_width,
-            );
-        } else {
-            self.add_disabled_item(&submenu, t(lang, "storage_unavailable"));
-        }
-
-        submenu_item.setSubmenu(Some(&submenu));
-        menu.addItem(&submenu_item);
-    }
-
-    fn add_history_toggle_submenu(
-        &self,
-        menu: &NSMenu,
-        title: &str,
-        entries: &[&HistoryEntry],
-        empty_title: &str,
-        menu_width: usize,
-    ) {
-        let submenu_item = self.new_menu_item(title);
-        let submenu = NSMenu::initWithTitle(NSMenu::alloc(self.mtm()), &NSString::from_str(title));
-        self.configure_menu_appearance(&submenu);
-
-        if entries.is_empty() {
-            self.add_disabled_item(&submenu, empty_title);
-        } else {
-            for (idx, entry) in entries.iter().enumerate() {
-                self.add_history_reference_item(
-                    &submenu,
-                    idx,
-                    entry,
-                    sel!(toggleHistoryPin:),
-                    menu_width,
-                );
-            }
-        }
-
-        submenu_item.setSubmenu(Some(&submenu));
-        menu.addItem(&submenu_item);
-    }
-
-    fn add_history_reference_item(
-        &self,
-        menu: &NSMenu,
-        idx: usize,
-        entry: &HistoryEntry,
-        action: objc2::runtime::Sel,
-        menu_width: usize,
-    ) {
-        let (title, truncated) = history_item_title(idx, entry, menu_width);
-        self.add_action_item_with_tooltip(
-            menu,
-            &title,
-            action,
-            entry.id as isize,
-            truncated.then_some(entry.content.as_str()),
-        );
-    }
-
     fn add_rich_history_menu(&self, menu: &NSMenu, lang: Language) {
         let settings = self.settings();
         let submenu_item = self.new_menu_item(t(lang, "rich_history"));
@@ -664,6 +599,45 @@ impl MenuDelegate {
                             sel!(copyRichHistoryItem:),
                             entry.id as isize,
                             truncated.then_some(entry.label.as_str()),
+                        );
+                    }
+                }
+            }
+        } else {
+            self.add_disabled_item(&submenu, t(lang, "storage_unavailable"));
+        }
+
+        submenu_item.setSubmenu(Some(&submenu));
+        menu.addItem(&submenu_item);
+    }
+
+    fn add_snippets_menu(&self, menu: &NSMenu, lang: Language) {
+        let settings = self.settings();
+        let submenu_item = self.new_menu_item(t(lang, "snippets"));
+        let submenu = NSMenu::initWithTitle(
+            NSMenu::alloc(self.mtm()),
+            &NSString::from_str(t(lang, "snippets")),
+        );
+        self.configure_menu_appearance(&submenu);
+
+        if let Some(store) = self.store() {
+            match sorted_snippets(store.load_snippets().unwrap_or_default()) {
+                snippets if snippets.is_empty() => {
+                    self.add_disabled_item(&submenu, t(lang, "no_snippets"));
+                }
+                snippets => {
+                    for (idx, snippet) in
+                        snippets.iter().take(settings.max_history_items).enumerate()
+                    {
+                        let (title, name_truncated, content_truncated) =
+                            snippet_item_title(snippet, settings.menu_width);
+                        let tooltip = format!("{} - {}", snippet.name, snippet.content);
+                        self.add_action_item_with_tooltip(
+                            &submenu,
+                            &title,
+                            sel!(copySnippetItem:),
+                            (idx + 1) as isize,
+                            (name_truncated || content_truncated).then_some(tooltip.as_str()),
                         );
                     }
                 }
@@ -924,24 +898,31 @@ fn copy_history_entry(store: &Store, id: u64, paste: bool) -> Result<(), String>
     Ok(())
 }
 
-fn toggle_history_pin(store: &Store, id: u64) -> Result<(), String> {
-    let mut entries = store.load_history()?;
+fn copy_rich_history_entry(store: &Store, id: u64, paste: bool) -> Result<(), String> {
+    let mut entries = store.load_rich_history()?;
     let entry = entries
         .iter_mut()
         .find(|entry| entry.id == id)
-        .ok_or_else(|| format!("history item `{id}` was not found"))?;
-    entry.pinned = !entry.pinned;
+        .ok_or_else(|| format!("rich history item `{id}` was not found"))?;
+    clipboard::write_rich_clipboard(entry)?;
+    entry.use_count += 1;
     entry.updated_at = storage::now_millis();
-    store.save_history(&entries)
+    store.save_rich_history(&entries)?;
+    if paste {
+        clipboard::paste_frontmost()?;
+    }
+    Ok(())
 }
 
-fn copy_rich_history_entry(store: &Store, id: u64, paste: bool) -> Result<(), String> {
-    let mut entries = store.load_rich_history()?;
-    let entry_index = entries
-        .iter()
-        .position(|entry| entry.id == id)
-        .ok_or_else(|| format!("rich history item `{id}` was not found"))?;
-    clipboard::write_rich_clipboard(&entries[entry_index])?;
+fn copy_snippet_by_index(store: &Store, index: usize, paste: bool) -> Result<(), String> {
+    let mut snippets = sorted_snippets(store.load_snippets()?);
+    let snippet = snippets
+        .get_mut(index.saturating_sub(1))
+        .ok_or_else(|| format!("snippet index `{index}` was not found"))?;
+    clipboard::write_text(&snippet.content)?;
+    snippet.use_count += 1;
+    snippet.updated_at = storage::now_millis();
+    store.save_snippets(&snippets)?;
     if paste {
         clipboard::paste_frontmost()?;
     }
@@ -963,6 +944,29 @@ fn history_item_title(index: usize, entry: &HistoryEntry, menu_width: usize) -> 
     (format!("{prefix}{content}"), truncated)
 }
 
+fn snippet_item_title(snippet: &SnippetEntry, menu_width: usize) -> (String, bool, bool) {
+    let title_units = title_units_for_width(menu_width);
+    let separator_units = display_units_for_text(SNIPPET_SEPARATOR);
+    let available_units = title_units
+        .saturating_sub(separator_units)
+        .max(ELLIPSIS_UNITS * 2);
+    let min_side_units = MIN_PREVIEW_UNITS.min(available_units / 2);
+    let name_units = (available_units / 3)
+        .max(min_side_units)
+        .min(available_units.saturating_sub(min_side_units));
+    let (name, name_truncated) = preview_with_truncation(&snippet.name, name_units);
+    let content_units = available_units
+        .saturating_sub(display_units_for_text(&name))
+        .max(min_side_units);
+    let (content, content_truncated) = preview_with_truncation(&snippet.content, content_units);
+
+    (
+        format!("{name}{SNIPPET_SEPARATOR}{content}"),
+        name_truncated,
+        content_truncated,
+    )
+}
+
 fn sorted_history(mut entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
     entries.sort_by(|left, right| {
         right
@@ -972,6 +976,193 @@ fn sorted_history(mut entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
             .then_with(|| right.id.cmp(&left.id))
     });
     entries
+}
+
+fn sorted_rich_history(mut entries: Vec<RichHistoryEntry>) -> Vec<RichHistoryEntry> {
+    entries.sort_by(|left, right| {
+        right
+            .pinned
+            .cmp(&left.pinned)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    entries
+}
+
+fn adjusted_popup_location(
+    location: NSPoint,
+    menu_item_count: usize,
+    mtm: MainThreadMarker,
+) -> NSPoint {
+    let Some(visible_frame) = visible_frame_for_point(location, mtm) else {
+        return location;
+    };
+    let estimated_height = estimate_menu_height(menu_item_count);
+    adjusted_popup_location_for_frame(location, visible_frame, estimated_height)
+}
+
+fn build_preferences_controls(
+    settings: AppSettings,
+    lang: Language,
+    mtm: MainThreadMarker,
+) -> PreferencesControls {
+    let view = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 216.0)),
+    );
+
+    let language_label =
+        NSTextField::labelWithString(&NSString::from_str(t(lang, "language")), mtm);
+    language_label.setFrame(NSRect::new(
+        NSPoint::new(0.0, 176.0),
+        NSSize::new(120.0, 24.0),
+    ));
+    let language_popup = NSPopUpButton::initWithFrame_pullsDown(
+        NSPopUpButton::alloc(mtm),
+        NSRect::new(NSPoint::new(150.0, 172.0), NSSize::new(180.0, 28.0)),
+        false,
+    );
+    language_popup.addItemWithTitle(&NSString::from_str("English"));
+    language_popup.addItemWithTitle(&NSString::from_str("中文"));
+    language_popup.selectItemAtIndex(match settings.language {
+        Language::English => 0,
+        Language::Chinese => 1,
+    });
+
+    let history_limit_label =
+        NSTextField::labelWithString(&NSString::from_str(t(lang, "history_limit")), mtm);
+    history_limit_label.setFrame(NSRect::new(
+        NSPoint::new(0.0, 136.0),
+        NSSize::new(140.0, 24.0),
+    ));
+    let history_limit_field = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(150.0, 132.0), NSSize::new(90.0, 24.0)),
+    );
+    history_limit_field
+        .setStringValue(&NSString::from_str(&settings.max_history_items.to_string()));
+
+    let visible_count_label =
+        NSTextField::labelWithString(&NSString::from_str(t(lang, "visible_count")), mtm);
+    visible_count_label.setFrame(NSRect::new(
+        NSPoint::new(0.0, 96.0),
+        NSSize::new(140.0, 24.0),
+    ));
+    let visible_count_field = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(150.0, 92.0), NSSize::new(90.0, 24.0)),
+    );
+    visible_count_field.setStringValue(&NSString::from_str(
+        &settings.visible_history_items.to_string(),
+    ));
+
+    let menu_width_label =
+        NSTextField::labelWithString(&NSString::from_str(t(lang, "menu_width")), mtm);
+    menu_width_label.setFrame(NSRect::new(
+        NSPoint::new(0.0, 56.0),
+        NSSize::new(140.0, 24.0),
+    ));
+    let menu_width_field = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(150.0, 52.0), NSSize::new(90.0, 24.0)),
+    );
+    menu_width_field.setStringValue(&NSString::from_str(&settings.menu_width.to_string()));
+
+    let rich_label =
+        NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_capture_setting")), mtm);
+    rich_label.setFrame(NSRect::new(
+        NSPoint::new(0.0, 16.0),
+        NSSize::new(140.0, 24.0),
+    ));
+    let rich_popup = NSPopUpButton::initWithFrame_pullsDown(
+        NSPopUpButton::alloc(mtm),
+        NSRect::new(NSPoint::new(150.0, 12.0), NSSize::new(180.0, 28.0)),
+        false,
+    );
+    rich_popup.addItemWithTitle(&NSString::from_str(t(lang, "enabled")));
+    rich_popup.addItemWithTitle(&NSString::from_str(t(lang, "disabled")));
+    rich_popup.selectItemAtIndex(if settings.capture_rich_clipboard {
+        0
+    } else {
+        1
+    });
+
+    view.addSubview(&language_label);
+    view.addSubview(&language_popup);
+    view.addSubview(&history_limit_label);
+    view.addSubview(&history_limit_field);
+    view.addSubview(&visible_count_label);
+    view.addSubview(&visible_count_field);
+    view.addSubview(&menu_width_label);
+    view.addSubview(&menu_width_field);
+    view.addSubview(&rich_label);
+    view.addSubview(&rich_popup);
+
+    PreferencesControls {
+        view,
+        history_limit_field,
+        visible_count_field,
+        menu_width_field,
+        language_popup,
+        rich_popup,
+    }
+}
+
+fn read_preferences_controls(controls: &PreferencesControls) -> AppSettings {
+    let language = match controls.language_popup.indexOfSelectedItem() {
+        1 => Language::Chinese,
+        _ => Language::English,
+    };
+    let max_history_items = parse_positive_usize(
+        &nsstring_to_string(&controls.history_limit_field.stringValue()),
+        AppSettings::default().max_history_items,
+    );
+    let visible_history_items = parse_positive_usize(
+        &nsstring_to_string(&controls.visible_count_field.stringValue()),
+        AppSettings::default().visible_history_items,
+    );
+    let menu_width = parse_positive_usize(
+        &nsstring_to_string(&controls.menu_width_field.stringValue()),
+        AppSettings::default().menu_width,
+    );
+    storage::normalize_settings(AppSettings {
+        language,
+        capture_rich_clipboard: controls.rich_popup.indexOfSelectedItem() == 0,
+        max_history_items,
+        visible_history_items,
+        menu_width,
+    })
+}
+
+fn prune_store_history(store: &Store, max_items: usize) -> Result<(), String> {
+    let mut history = store.load_history()?;
+    storage::prune_history(&mut history, max_items);
+    store.save_history(&history)?;
+
+    let mut rich_history = store.load_rich_history()?;
+    storage::prune_rich_history(&mut rich_history, max_items);
+    store.save_rich_history(&rich_history)
+}
+
+fn parse_positive_usize(value: &str, fallback: usize) -> usize {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
+
+fn set_menu_item_tooltip(item: &NSMenuItem, tooltip: &str) {
+    item.setToolTip(Some(&NSString::from_str(tooltip)));
+}
+
+fn title_units_for_width(menu_width: usize) -> usize {
+    menu_width
+        .saturating_sub(MENU_WIDTH_TEXT_PADDING)
+        .checked_div(MENU_WIDTH_UNIT_PIXELS)
+        .unwrap_or(0)
+        .max(MIN_PREVIEW_UNITS)
 }
 
 fn sorted_rich_history(mut entries: Vec<RichHistoryEntry>) -> Vec<RichHistoryEntry> {
@@ -1250,16 +1441,13 @@ fn t(language: Language, key: &str) -> &'static str {
             "no_rich_history" => "No images or files yet",
             "kind_image" => "Image",
             "kind_file" => "File",
-            "favorites" => "Favorites",
-            "no_favorites" => "No favorites yet",
-            "add_favorite" => "Add Favorite",
-            "remove_favorite" => "Remove Favorite",
-            "no_favorite_candidates" => "No history items to favorite",
-            "notes" => "Notes",
+            "snippets" => "Snippets",
+            "no_snippets" => "No snippets",
             "settings" => "Settings",
             "rich_enabled" => "[x] Capture images and files",
             "rich_disabled" => "[ ] Capture images and files",
             "clear_history" => "Clear History",
+            "open_data_dir" => "Open Data Directory",
             "quit" => "Quit",
             _ => "",
         },
@@ -1290,16 +1478,13 @@ fn t(language: Language, key: &str) -> &'static str {
             "no_rich_history" => "暂无图片或文件",
             "kind_image" => "图片",
             "kind_file" => "文件",
-            "favorites" => "收藏",
-            "no_favorites" => "暂无收藏",
-            "add_favorite" => "添加收藏",
-            "remove_favorite" => "取消收藏",
-            "no_favorite_candidates" => "暂无可收藏历史",
-            "notes" => "备忘录",
+            "snippets" => "文本片段",
+            "no_snippets" => "暂无文本片段",
             "settings" => "设置",
             "rich_enabled" => "[x] 捕获图片和文件",
             "rich_disabled" => "[ ] 捕获图片和文件",
             "clear_history" => "清空历史",
+            "open_data_dir" => "打开数据目录",
             "quit" => "退出",
             _ => "",
         },

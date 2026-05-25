@@ -224,29 +224,6 @@ pub fn prune_history(entries: &mut Vec<HistoryEntry>, max_items: usize) {
     }
 }
 
-pub fn upsert_snippet(snippets: &mut Vec<SnippetEntry>, name: String, content: String) -> bool {
-    let now = now_millis();
-    if let Some(index) = snippets.iter().position(|snippet| snippet.name == name) {
-        let mut snippet = snippets.remove(index);
-        snippet.content = content;
-        snippet.updated_at = now;
-        snippets.insert(0, snippet);
-        false
-    } else {
-        snippets.insert(
-            0,
-            SnippetEntry {
-                name,
-                content,
-                created_at: now,
-                updated_at: now,
-                use_count: 0,
-            },
-        );
-        true
-    }
-}
-
 pub fn upsert_rich_history(
     entries: &mut Vec<RichHistoryEntry>,
     mut entry: RichHistoryEntry,
