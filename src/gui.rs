@@ -5,14 +5,15 @@ use std::ptr::null_mut;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSEvent, NSMenu, NSMenuItem, NSPopUpButton, NSScreen, NSStatusBar,
-    NSStatusItem, NSTextField, NSVariableStatusItemLength, NSView,
+    NSApplicationDelegate, NSBackingStoreType, NSEvent, NSImage, NSImageScaling, NSImageView,
+    NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton, NSScreen, NSStatusBar, NSStatusItem,
+    NSTextField, NSVariableStatusItemLength, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
     NSString, NSTimer,
 };
 
@@ -103,6 +104,9 @@ struct MenuDelegateIvars {
     last_error: RefCell<Option<String>>,
     hotkey_ref: Cell<EventHotKeyRef>,
     handler_ref: Cell<EventHandlerRef>,
+    preview_window: OnceCell<Retained<NSWindow>>,
+    preview_image_view: OnceCell<Retained<NSImageView>>,
+    image_previews: RefCell<std::collections::HashMap<isize, Vec<u8>>>,
 }
 
 define_class!(
@@ -112,6 +116,21 @@ define_class!(
     struct MenuDelegate;
 
     unsafe impl NSObjectProtocol for MenuDelegate {}
+
+    unsafe impl NSMenuDelegate for MenuDelegate {
+        #[unsafe(method(menu:willHighlightItem:))]
+        fn menu_will_highlight_item(&self, _menu: &NSMenu, item: Option<&NSMenuItem>) {
+            match item {
+                Some(item) => self.update_image_preview(item.tag()),
+                None => self.hide_image_preview(),
+            }
+        }
+
+        #[unsafe(method(menuDidClose:))]
+        fn menu_did_close(&self, _menu: &NSMenu) {
+            self.hide_image_preview();
+        }
+    }
 
     unsafe impl NSApplicationDelegate for MenuDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
@@ -641,6 +660,8 @@ impl MenuDelegate {
             &NSString::from_str(t(lang, "rich_history")),
         );
         self.configure_menu_appearance(&submenu);
+        submenu.setDelegate(Some(ProtocolObject::from_ref(self)));
+        self.ivars().image_previews.borrow_mut().clear();
 
         if let Some(store) = self.store() {
             match sorted_rich_history(store.load_rich_history().unwrap_or_default()) {
@@ -653,6 +674,14 @@ impl MenuDelegate {
                             storage::RichClipboardKind::Image => t(lang, "kind_image"),
                             storage::RichClipboardKind::File => t(lang, "kind_file"),
                         };
+                        if entry.kind == storage::RichClipboardKind::Image
+                            && let Some(data) = preview_image_data(entry)
+                        {
+                            self.ivars()
+                                .image_previews
+                                .borrow_mut()
+                                .insert(entry.id as isize, data);
+                        }
                         let prefix = format!("{kind}: ");
                         let preview_units = preview_units_for_prefix(settings.menu_width, &prefix);
                         let (label, truncated) =
@@ -674,6 +703,80 @@ impl MenuDelegate {
 
         submenu_item.setSubmenu(Some(&submenu));
         menu.addItem(&submenu_item);
+    }
+
+    fn ensure_preview_window(&self) -> (Retained<NSWindow>, Retained<NSImageView>) {
+        let window = self
+            .ivars()
+            .preview_window
+            .get_or_init(|| {
+                let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 240.0));
+                let window: Retained<NSWindow> = unsafe {
+                    NSWindow::initWithContentRect_styleMask_backing_defer(
+                        NSWindow::alloc(self.mtm()),
+                        rect,
+                        NSWindowStyleMask::Borderless,
+                        NSBackingStoreType::Buffered,
+                        false,
+                    )
+                };
+                window.setLevel(objc2_app_kit::NSPopUpMenuWindowLevel);
+                window.setIgnoresMouseEvents(true);
+                window.setHasShadow(true);
+                window.setOpaque(false);
+                window.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+                window
+            })
+            .clone();
+
+        let image_view = self
+            .ivars()
+            .preview_image_view
+            .get_or_init(|| {
+                let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 240.0));
+                let view = NSImageView::initWithFrame(NSImageView::alloc(self.mtm()), rect);
+                view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+                if let Some(content) = window.contentView() {
+                    content.addSubview(&view);
+                }
+                view
+            })
+            .clone();
+
+        (window, image_view)
+    }
+
+    fn update_image_preview(&self, tag: isize) {
+        if tag <= 0 {
+            self.hide_image_preview();
+            return;
+        }
+        let data = match self.ivars().image_previews.borrow().get(&tag) {
+            Some(bytes) => bytes.clone(),
+            None => {
+                self.hide_image_preview();
+                return;
+            }
+        };
+        let ns_data = unsafe {
+            NSData::dataWithBytes_length(data.as_ptr().cast::<c_void>(), data.len() as _)
+        };
+        let image_opt = NSImage::initWithData(NSImage::alloc(), &ns_data);
+        let Some(image) = image_opt else {
+            self.hide_image_preview();
+            return;
+        };
+
+        let (window, image_view) = self.ensure_preview_window();
+        image_view.setImage(Some(&image));
+        position_preview_window(&window, self.mtm());
+        window.orderFront(None);
+    }
+
+    fn hide_image_preview(&self) {
+        if let Some(window) = self.ivars().preview_window.get() {
+            window.orderOut(None);
+        }
     }
 
     fn configure_menu_appearance(&self, menu: &NSMenu) {
@@ -1203,6 +1306,44 @@ fn adjusted_popup_location_for_frame(
 
 fn estimate_menu_height(item_count: usize) -> f64 {
     item_count as f64 * MENU_ITEM_HEIGHT_ESTIMATE + MENU_VERTICAL_PADDING_ESTIMATE
+}
+
+fn preview_image_data(entry: &RichHistoryEntry) -> Option<Vec<u8>> {
+    const PNG_TYPES: &[&str] = &["public.png", "Apple PNG pasteboard type"];
+    const TIFF_TYPES: &[&str] = &["public.tiff", "NeXTTIFFPboardType"];
+    for flavor in &entry.flavors {
+        if PNG_TYPES.contains(&flavor.type_name.as_str()) {
+            return Some(flavor.data.clone());
+        }
+    }
+    for flavor in &entry.flavors {
+        if TIFF_TYPES.contains(&flavor.type_name.as_str()) {
+            return Some(flavor.data.clone());
+        }
+    }
+    None
+}
+
+fn position_preview_window(window: &NSWindow, mtm: MainThreadMarker) {
+    let mouse = NSEvent::mouseLocation();
+    let frame = window.frame();
+    let size = frame.size;
+    let mut origin = NSPoint::new(mouse.x + 16.0, mouse.y - size.height / 2.0);
+    if let Some(visible) = visible_frame_for_point(mouse, mtm) {
+        if origin.x + size.width > visible.max().x {
+            origin.x = mouse.x - 16.0 - size.width;
+        }
+        if origin.x < visible.min().x {
+            origin.x = visible.min().x + MENU_SCREEN_MARGIN;
+        }
+        if origin.y < visible.min().y {
+            origin.y = visible.min().y + MENU_SCREEN_MARGIN;
+        }
+        if origin.y + size.height > visible.max().y {
+            origin.y = visible.max().y - size.height - MENU_SCREEN_MARGIN;
+        }
+    }
+    window.setFrameOrigin(origin);
 }
 
 fn visible_frame_for_point(point: NSPoint, mtm: MainThreadMarker) -> Option<NSRect> {
