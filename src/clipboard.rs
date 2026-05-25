@@ -205,6 +205,9 @@ pub fn write_text(text: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub fn paste_frontmost() -> Result<(), String> {
+    use std::thread;
+    use std::time::Duration;
+
     const KEY_CODE_V: u16 = 0x09;
     const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 1 << 20;
 
@@ -215,6 +218,7 @@ pub fn paste_frontmost() -> Result<(), String> {
         );
     }
 
+    thread::sleep(Duration::from_millis(50));
     post_key(KEY_CODE_V, K_CG_EVENT_FLAG_MASK_COMMAND)?;
 
     Ok(())
