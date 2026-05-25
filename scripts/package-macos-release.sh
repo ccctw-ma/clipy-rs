@@ -31,26 +31,19 @@ if [[ -n "$ENTITLEMENTS_PATH" && ! -f "$ENTITLEMENTS_PATH" ]]; then
   exit 1
 fi
 
+APP_DIR="$PROJECT_DIR/target/macos-app/$APP_NAME.app"
+DMG_PATH="$PROJECT_DIR/target/macos-dmg/$DMG_NAME.dmg"
+
+# 1. 构建 .app（package-macos-app.sh 会处理图标）
 "$PROJECT_DIR/scripts/package-macos-app.sh"
 
-APP_ROOT="$PROJECT_DIR/target/macos-app"
-APP_DIR="$APP_ROOT/$APP_NAME.app"
-DMG_ROOT="$PROJECT_DIR/target/macos-dmg"
-STAGING_DIR="$DMG_ROOT/staging"
-DMG_PATH="$DMG_ROOT/$DMG_NAME.dmg"
-
-if [[ ! -d "$APP_DIR" ]]; then
-  echo "error: app bundle not found at $APP_DIR" >&2
-  exit 1
-fi
-
+# 2. 签名 .app（必须在打包成 dmg 之前完成）
 SIGN_ARGS=(
   --force
   --timestamp
   --options runtime
   --sign "$SIGN_IDENTITY"
 )
-
 if [[ -n "$ENTITLEMENTS_PATH" ]]; then
   SIGN_ARGS+=(--entitlements "$ENTITLEMENTS_PATH")
 fi
@@ -60,24 +53,16 @@ codesign "${SIGN_ARGS[@]}" "$APP_DIR"
 codesign --verify --strict --verbose=2 "$APP_DIR"
 spctl --assess --type execute --verbose=2 "$APP_DIR" || true
 
-rm -rf "$STAGING_DIR"
-mkdir -p "$STAGING_DIR" "$DMG_ROOT"
-cp -R "$APP_DIR" "$STAGING_DIR/"
-ln -s /Applications "$STAGING_DIR/Applications"
+# 3. 复用 dmg 脚本生成 dmg（跳过其内部的 .app 重新构建）
+SKIP_APP_BUILD=1 "$PROJECT_DIR/scripts/package-macos-dmg.sh"
 
-rm -f "$DMG_PATH"
-hdiutil create \
-  -volname "$APP_NAME" \
-  -srcfolder "$STAGING_DIR" \
-  -ov \
-  -format UDZO \
-  "$DMG_PATH"
-
+# 4. 签名 dmg
 echo "Signing dmg: $DMG_PATH"
 codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
 codesign --verify --verbose=2 "$DMG_PATH"
 hdiutil verify "$DMG_PATH"
 
+# 5. 公证
 echo "Submitting dmg for notarization"
 if [[ -n "$NOTARY_PROFILE" ]]; then
   xcrun notarytool submit "$DMG_PATH" \
@@ -91,6 +76,7 @@ else
     --wait
 fi
 
+# 6. Staple 公证票据
 echo "Stapling app and dmg"
 xcrun stapler staple "$APP_DIR"
 xcrun stapler staple "$DMG_PATH"

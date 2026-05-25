@@ -10,7 +10,10 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-"$PROJECT_DIR/scripts/package-macos-app.sh"
+# 允许上层脚本（如 package-macos-release.sh）跳过重复的 .app 构建
+if [[ -z "${SKIP_APP_BUILD:-}" ]]; then
+  "$PROJECT_DIR/scripts/package-macos-app.sh"
+fi
 
 APP_ROOT="$PROJECT_DIR/target/macos-app"
 APP_DIR="$APP_ROOT/$APP_NAME.app"
@@ -36,6 +39,9 @@ hdiutil create \
   -ov \
   -format UDZO \
   "$DMG_PATH"
+
+# 清理 staging 目录，避免 Spotlight 出现多个同名 .app 条目
+rm -rf "$STAGING_DIR"
 
 echo "Created $DMG_PATH"
 echo "Open: open \"$DMG_PATH\""

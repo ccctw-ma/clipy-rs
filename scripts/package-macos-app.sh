@@ -64,9 +64,22 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>Clipy RS needs accessibility access to simulate keyboard shortcuts (Cmd+V) for automatic pasting of clipboard content into the active application.</string>
 </dict>
 </plist>
 PLIST
+
+ICON_PATH="$PROJECT_DIR/icons/AppIcon.icns"
+if [[ -f "$ICON_PATH" ]]; then
+  cp "$ICON_PATH" "$RESOURCES_DIR/AppIcon.icns"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$CONTENTS_DIR/Info.plist"
+  plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
+  echo "Installed icon: $RESOURCES_DIR/AppIcon.icns"
+else
+  echo "warning: icon file not found at $ICON_PATH, skipping icon installation"
+  echo "hint: generate it first, for example: iconutil -c icns icons/AppIcon.iconset -o icons/AppIcon.icns"
+fi
 
 echo "Created $APP_DIR"
 echo "Run: open \"$APP_DIR\""
