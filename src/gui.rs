@@ -172,7 +172,7 @@ define_class!(
             if let Some(store) = self.store() {
                 match copy_history_entry(store, id as u64, true) {
                     Ok(()) => self.clear_error(),
-                    Err(err) => self.set_error(err),
+                    Err(err) => self.report_paste_error(err),
                 }
             }
             self.rebuild_menu();
@@ -189,7 +189,7 @@ define_class!(
             if let Some(store) = self.store() {
                 match copy_rich_history_entry(store, id as u64, true) {
                     Ok(()) => self.clear_error(),
-                    Err(err) => self.set_error(err),
+                    Err(err) => self.report_paste_error(err),
                 }
             }
             self.rebuild_menu();
@@ -932,6 +932,44 @@ impl MenuDelegate {
     fn clear_error(&self) {
         *self.ivars().last_error.borrow_mut() = None;
     }
+
+    /// 处理来自 `paste_frontmost` 等接口的错误：
+    /// 若是辅助功能权限相关失败，弹原生 NSAlert 引导用户去系统设置；
+    /// 否则照旧把错误写入菜单状态栏。
+    fn report_paste_error(&self, err: String) {
+        if err.contains("Accessibility permission") {
+            self.set_error(err);
+            self.show_accessibility_alert();
+        } else {
+            self.set_error(err);
+        }
+    }
+
+    fn show_accessibility_alert(&self) {
+        // 已经授权就直接清状态，不打扰用户。
+        if clipboard::is_accessibility_trusted() {
+            self.clear_error();
+            return;
+        }
+        let lang = self.settings().language;
+        let alert = NSAlert::new(self.mtm());
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.setMessageText(&NSString::from_str(t(lang, "permission_required_title")));
+        alert.setInformativeText(&NSString::from_str(t(lang, "permission_required_body")));
+        alert.addButtonWithTitle(&NSString::from_str(t(lang, "open_settings")));
+        alert.addButtonWithTitle(&NSString::from_str(t(lang, "cancel")));
+
+        let app = NSApplication::sharedApplication(self.mtm());
+        app.activate();
+
+        if alert.runModal() == NSAlertFirstButtonReturn {
+            let _ = Command::new("open")
+                .arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                )
+                .status();
+        }
+    }
 }
 
 pub fn run() -> Result<(), String> {
@@ -1402,6 +1440,11 @@ fn t(language: Language, key: &str) -> &'static str {
             "rich_disabled" => "[ ] Capture images and files",
             "clear_history" => "Clear History",
             "quit" => "Quit",
+            "permission_required_title" => "Accessibility Permission Required",
+            "permission_required_body" => {
+                "Clipy RS needs Accessibility permission to auto-paste. Please enable it in System Settings → Privacy & Security → Accessibility, then try again."
+            }
+            "open_settings" => "Open Settings",
             _ => "",
         },
         Language::Chinese => match key {
@@ -1442,6 +1485,11 @@ fn t(language: Language, key: &str) -> &'static str {
             "rich_disabled" => "[ ] 捕获图片和文件",
             "clear_history" => "清空历史",
             "quit" => "退出",
+            "permission_required_title" => "需要辅助功能权限",
+            "permission_required_body" => {
+                "Clipy RS 需要辅助功能权限才能自动粘贴。请在 系统设置 → 隐私与安全性 → 辅助功能 中启用 Clipy RS 后重试。"
+            }
+            "open_settings" => "打开系统设置",
             _ => "",
         },
     }

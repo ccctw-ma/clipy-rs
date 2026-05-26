@@ -211,7 +211,7 @@ pub fn paste_frontmost() -> Result<(), String> {
     const KEY_CODE_V: u16 = 0x09;
     const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 1 << 20;
 
-    if unsafe { !AXIsProcessTrusted() } {
+    if !is_accessibility_trusted() {
         return Err(
             "paste failed; grant Accessibility permission to Clipy RS or the launching terminal"
                 .to_string(),
@@ -237,7 +237,7 @@ pub fn move_cursor_left(count: usize) -> Result<(), String> {
         return Ok(());
     }
 
-    if unsafe { !AXIsProcessTrusted() } {
+    if !is_accessibility_trusted() {
         return Err(
             "cursor placement failed; grant Accessibility permission to Clipy RS or the launching terminal"
                 .to_string(),
@@ -304,6 +304,19 @@ unsafe extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
+}
+
+/// 是否已获得 macOS 辅助功能（Accessibility）权限。
+///
+/// 仅做静默检查；首次未决定时不会触发系统原生弹窗——由调用方负责后续 UI 引导。
+#[cfg(target_os = "macos")]
+pub fn is_accessibility_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_accessibility_trusted() -> bool {
+    true
 }
 
 #[cfg(target_os = "macos")]
