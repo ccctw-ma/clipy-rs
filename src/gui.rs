@@ -487,7 +487,11 @@ impl MenuDelegate {
 
     fn add_history_items(&self, menu: &NSMenu, entries: Vec<HistoryEntry>, lang: Language) {
         let settings = self.settings();
-        let entries = sorted_history(entries);
+        // 收藏项只在「收藏」子菜单里展示，不在主文本历史中重复出现。
+        let entries = sorted_history(entries)
+            .into_iter()
+            .filter(|entry| !entry.pinned)
+            .collect::<Vec<_>>();
         let limited_entries = entries
             .into_iter()
             .take(settings.max_history_items)

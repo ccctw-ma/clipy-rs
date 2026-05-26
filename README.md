@@ -17,9 +17,11 @@ keyboard events through CoreGraphics and macOS Accessibility.
 - Lists, searches, pins, removes, and clears history items.
 - Copies a previous history item back to the system clipboard.
 - Optionally sends Cmd+V to the frontmost app after copying.
-- Manages reusable text snippets.
+- Manages reusable text snippets, with an in-menu CRUD entry.
 - Provides a native macOS menu bar GUI.
 - Shows the menu with the global hotkey `Cmd+Shift+V`.
+- Hovers an image history item to preview the original image in a floating window.
+- Pops a guided dialog to grant Accessibility permission when auto-paste fails.
 - Provides a Settings submenu for language and clipboard-format options.
 - Switches the menu bar UI between English and Chinese.
 - Skips obvious secrets by default during capture and watch.
@@ -58,6 +60,13 @@ Build only the `.app` bundle:
 ```sh
 scripts/package-macos-app.sh
 open "target/macos-app/Clipy RS.app"
+```
+
+One-shot install into `/Applications` (rebuilds, closes any running
+instance, copies the bundle, and relaunches it):
+
+```sh
+scripts/install-macos-app.sh
 ```
 
 Customize the generated app name or bundle identifier:
@@ -278,7 +287,8 @@ Project layout:
 - `src/sensitive.rs`: simple sensitive-content detection.
 - `.githooks/pre-commit`: local commit-time format, lint, and test checks.
 - `scripts/install-git-hooks.sh`: enables the repository Git hooks.
-- `scripts/package-macos-app.sh`: builds `Clipy RS.app`.
+- `scripts/install-macos-app.sh`: one-shot build + install into `/Applications`.
+- `scripts/package-macos-app.sh`: builds `Clipy RS.app` (icon + Info.plist inline).
 - `scripts/package-macos-dmg.sh`: builds a drag-to-install DMG.
 - `scripts/package-macos-release.sh`: builds a signed and notarized DMG.
 - `.github/workflows/macos-dmg.yml`: CI DMG build workflow.
