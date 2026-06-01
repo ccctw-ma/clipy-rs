@@ -301,7 +301,15 @@ impl MenuDelegate {
         let status_bar = NSStatusBar::systemStatusBar();
         let item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         if let Some(button) = item.button(self.mtm()) {
-            button.setTitle(&NSString::from_str("Clip"));
+            // 优先使用内嵌的 logo 作为状态栏图标；macOS 会按当前菜单栏背景
+            // 自动以模板图（template image）形式重新着色，呈现单色 logo。
+            // 加载失败时退回到文字标题，保证菜单栏始终有可见入口。
+            if let Some(image) = load_status_bar_image() {
+                button.setImage(Some(&image));
+                button.setTitle(&NSString::from_str(""));
+            } else {
+                button.setTitle(&NSString::from_str("Clip"));
+            }
         }
 
         let menu =
@@ -1489,6 +1497,23 @@ fn preview_image_data(entry: &RichHistoryEntry) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// 加载内嵌的 logo PNG，并按状态栏推荐的 18pt 高度生成模板图。
+/// 模板图（template image）会在 macOS 菜单栏中按当前主题自动渲染成
+/// 黑色（浅色菜单栏）或白色（深色菜单栏）的单色 logo。
+fn load_status_bar_image() -> Option<Retained<NSImage>> {
+    const STATUS_BAR_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
+    let ns_data = unsafe {
+        NSData::dataWithBytes_length(
+            STATUS_BAR_ICON_BYTES.as_ptr().cast::<c_void>(),
+            STATUS_BAR_ICON_BYTES.len() as _,
+        )
+    };
+    let image = NSImage::initWithData(NSImage::alloc(), &ns_data)?;
+    image.setSize(NSSize::new(18.0, 18.0));
+    image.setTemplate(true);
+    Some(image)
 }
 
 fn position_preview_window(window: &NSWindow, mtm: MainThreadMarker) {
