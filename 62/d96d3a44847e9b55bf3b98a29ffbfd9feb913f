@@ -1,0 +1,251 @@
+.github/workflows/ci.yml
+  ed00f9fcd8a4aa41 1,7,11-12,20,23-24,26-27,29-30 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a1d7ef6a61ace05932b7183","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Single":1},{"Single":7},{"Range":[11,12]},{"Single":20},{"Range":[23,24]},{"Range":[26,27]},{"Range":[29,30]}]}]}
+README.md
+  ed00f9fcd8a4aa41 32-48,55-62,64-65,230-235,300 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a1d7ef6a61ace05932b7183","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[32,48]},{"Range":[55,62]},{"Range":[64,65]},{"Range":[230,235]},{"Single":300}]}]}
+README.zh-CN.md
+  ed00f9fcd8a4aa41 30-42,49-53,55,212,277 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a1d7ef6a61ace05932b7183","tool_type":"agent","tool_id":"Edit","line_ranges":[{"Range":[30,42]},{"Range":[49,53]},{"Single":55},{"Single":212},{"Single":277}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "62d96d3a44847e9b55bf3b98a29ffbfd9feb913f",
+  "prompts": {
+    "ed00f9fcd8a4aa41": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a1d4ae8a61ace05932b6e46",
+        "model": "openrouter-2o__dev"
+      },
+      "human_author": "mashichen <mashichen.msc@bytedance.com>",
+      "messages": [],
+      "total_additions": 85,
+      "total_deletions": 163,
+      "accepted_lines": 85,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    ".github/workflows/ci.yml": [
+      {
+        "hash": "ed00f9fcd8a4aa41",
+        "line_ranges": [
+          {
+            "Single": 1
+          },
+          {
+            "Single": 7
+          },
+          {
+            "Range": [
+              11,
+              12
+            ]
+          },
+          {
+            "Single": 20
+          },
+          {
+            "Range": [
+              23,
+              24
+            ]
+          },
+          {
+            "Range": [
+              26,
+              27
+            ]
+          },
+          {
+            "Range": [
+              29,
+              30
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a1d7ef6a61ace05932b7183",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Single": 1
+              },
+              {
+                "Single": 7
+              },
+              {
+                "Range": [
+                  11,
+                  12
+                ]
+              },
+              {
+                "Single": 20
+              },
+              {
+                "Range": [
+                  23,
+                  24
+                ]
+              },
+              {
+                "Range": [
+                  26,
+                  27
+                ]
+              },
+              {
+                "Range": [
+                  29,
+                  30
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "README.md": [
+      {
+        "hash": "ed00f9fcd8a4aa41",
+        "line_ranges": [
+          {
+            "Range": [
+              32,
+              48
+            ]
+          },
+          {
+            "Range": [
+              55,
+              62
+            ]
+          },
+          {
+            "Range": [
+              64,
+              65
+            ]
+          },
+          {
+            "Range": [
+              230,
+              235
+            ]
+          },
+          {
+            "Single": 300
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a1d7ef6a61ace05932b7183",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  32,
+                  48
+                ]
+              },
+              {
+                "Range": [
+                  55,
+                  62
+                ]
+              },
+              {
+                "Range": [
+                  64,
+                  65
+                ]
+              },
+              {
+                "Range": [
+                  230,
+                  235
+                ]
+              },
+              {
+                "Single": 300
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "README.zh-CN.md": [
+      {
+        "hash": "ed00f9fcd8a4aa41",
+        "line_ranges": [
+          {
+            "Range": [
+              30,
+              42
+            ]
+          },
+          {
+            "Range": [
+              49,
+              53
+            ]
+          },
+          {
+            "Single": 55
+          },
+          {
+            "Single": 212
+          },
+          {
+            "Single": 277
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a1d7ef6a61ace05932b7183",
+            "tool_type": "agent",
+            "tool_id": "Edit",
+            "line_ranges": [
+              {
+                "Range": [
+                  30,
+                  42
+                ]
+              },
+              {
+                "Range": [
+                  49,
+                  53
+                ]
+              },
+              {
+                "Single": 55
+              },
+              {
+                "Single": 212
+              },
+              {
+                "Single": 277
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "ed00f9fcd8a4aa41": {
+      "tool": "trae",
+      "conversation_id": "6a1d4ae8a61ace05932b6e46",
+      "session_id": "6a1d4ae8a61ace05932b6e46",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
