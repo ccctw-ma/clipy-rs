@@ -29,17 +29,40 @@ keyboard events through CoreGraphics and macOS Accessibility.
 
 ## Quick Start
 
-Build a personal-use drag-to-install DMG:
+This project is distributed as source only. There is no signed/notarized
+release, so the recommended way is to build it yourself with one command:
+
+```sh
+git clone https://github.com/ccctw-ma/clipy-rs.git
+cd clipy-rs
+scripts/install-macos-app.sh
+```
+
+The script builds the release binary, packages `Clipy RS.app`, copies it into
+`/Applications`, and relaunches it. Locally built apps do **not** carry the
+`com.apple.quarantine` attribute, so Gatekeeper will not block them.
+
+Prerequisites: macOS, Rust stable toolchain (`rustup`), and Xcode Command Line
+Tools (`xcode-select --install`).
+
+If you really want a DMG for offline copy, build it locally:
 
 ```sh
 scripts/package-macos-dmg.sh
 open "target/macos-dmg/Clipy RS.dmg"
 ```
 
-Open the DMG, then drag `Clipy RS.app` into `Applications`.
+The DMG is **not signed and not notarized**. After dragging the app into
+`Applications`, macOS will say "Clipy RS cannot be opened because Apple cannot
+check it for malicious software". Strip the quarantine flag once and you are
+done:
 
-If macOS says the app cannot be verified, right-click `Clipy RS.app`, choose
-Open, then confirm Open again. This is expected for an unsigned personal build.
+```sh
+xattr -dr com.apple.quarantine "/Applications/Clipy RS.app"
+```
+
+Or right-click `Clipy RS.app` → Open → confirm Open. Building from source
+avoids both of these steps.
 
 ## Installation
 
@@ -204,29 +227,12 @@ RCLIPY_HOME="/path/to/data" clipy-rs path
 
 ## GitHub CI
 
-The repository includes a GitHub Actions workflow that builds a macOS DMG on
-every push to `main`:
-
-```text
-.github/workflows/macos-dmg.yml
-```
-
-For personal use, you do not need Apple signing secrets. After pushing to
-`main`, GitHub Actions builds an unsigned DMG and uploads it in two places:
-
-- the workflow artifact named `clipy-rs-macos-dmg-<commit-sha>`
-- the rolling GitHub Release named `main-latest`
-
-Download `Clipy-RS-main.dmg` from the `main-latest` release, open it, then drag
-`Clipy RS.app` into `Applications`.
-
-To trigger the CI build:
-
-```sh
-git add .
-git commit -m "Update macOS DMG build"
-git push origin main
-```
+The repository includes a GitHub Actions workflow that runs format, lint, and
+unit tests on every push to `main`. It does **not** publish a DMG, because
+unsigned DMGs distributed through GitHub Release force every downloader to
+either right-click → Open or run `xattr -dr com.apple.quarantine ...`. Source
+builds avoid that, so users are expected to clone and run
+[`scripts/install-macos-app.sh`](scripts/install-macos-app.sh) themselves.
 
 ## Development
 
@@ -291,7 +297,7 @@ Project layout:
 - `scripts/package-macos-app.sh`: builds `Clipy RS.app` (icon + Info.plist inline).
 - `scripts/package-macos-dmg.sh`: builds a drag-to-install DMG.
 - `scripts/package-macos-release.sh`: builds a signed and notarized DMG.
-- `.github/workflows/macos-dmg.yml`: CI DMG build workflow.
+- `.github/workflows/ci.yml`: CI workflow for fmt/clippy/test on every push.
 
 ## Packaging Scripts
 
