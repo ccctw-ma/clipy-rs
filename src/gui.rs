@@ -397,24 +397,32 @@ impl MenuDelegate {
             return;
         };
 
-        if let Ok(change_count) = clipboard::change_count() {
-            if !force_status && self.ivars().last_pasteboard_change.get() == change_count {
-                return;
-            }
-            self.ivars().last_pasteboard_change.set(change_count);
+        // 注意：不要在真正读到内容之前就更新 last_pasteboard_change，
+        // 否则若此次轮询正好赶在剪贴板写入间隙（read_text 偶发为空），
+        // 该 change_count 会被记成"已处理"，下次轮询直接跳过，
+        // 导致历史第一项永远缺失。
+        let current_change = clipboard::change_count().ok();
+        if let Some(change_count) = current_change
+            && !force_status
+            && self.ivars().last_pasteboard_change.get() == change_count
+        {
+            return;
         }
 
         let settings = self.settings();
         if settings.capture_rich_clipboard {
             match clipboard::read_rich_clipboard(CAPTURE_MAX_RICH_BYTES) {
                 Ok(Some(entry)) => {
-                    match capture_rich(store, entry, settings.max_history_items) {
+                    match capture_rich(store, entry, settings.max_rich_history_items) {
                         Ok(CaptureStatus::Changed) => {
                             self.clear_error();
                             self.rebuild_menu();
                         }
                         Ok(CaptureStatus::Unchanged | CaptureStatus::Ignored) => {}
                         Err(err) => self.set_error(err),
+                    }
+                    if let Some(change_count) = current_change {
+                        self.ivars().last_pasteboard_change.set(change_count);
                     }
                     return;
                 }
@@ -425,14 +433,28 @@ impl MenuDelegate {
         }
 
         match clipboard::read_text() {
-            Ok(text) => match capture_text(store, text, settings.max_history_items) {
-                Ok(CaptureStatus::Changed) => {
-                    self.clear_error();
-                    self.rebuild_menu();
+            Ok(text) => {
+                let normalized = normalize_clipboard_text(text.clone());
+                if normalized.is_empty() {
+                    // 剪贴板尚未就绪或非纯文本类型；不要消耗本次 change_count，
+                    // 等下一次轮询再尝试，避免历史丢失。
+                    if force_status && let Some(change_count) = current_change {
+                        self.ivars().last_pasteboard_change.set(change_count);
+                    }
+                    return;
                 }
-                Ok(CaptureStatus::Unchanged | CaptureStatus::Ignored) => {}
-                Err(err) => self.set_error(err),
-            },
+                match capture_text(store, text, settings.max_history_items) {
+                    Ok(CaptureStatus::Changed) => {
+                        self.clear_error();
+                        self.rebuild_menu();
+                    }
+                    Ok(CaptureStatus::Unchanged | CaptureStatus::Ignored) => {}
+                    Err(err) => self.set_error(err),
+                }
+                if let Some(change_count) = current_change {
+                    self.ivars().last_pasteboard_change.set(change_count);
+                }
+            }
             Err(err) if force_status => self.set_error(err),
             Err(_) => {}
         }
@@ -668,36 +690,44 @@ impl MenuDelegate {
         self.ivars().image_previews.borrow_mut().clear();
 
         if let Some(store) = self.store() {
-            match sorted_rich_history(store.load_rich_history().unwrap_or_default()) {
-                entries if entries.is_empty() => {
-                    self.add_disabled_item(&submenu, t(lang, "no_rich_history"));
+            let entries = sorted_rich_history(store.load_rich_history().unwrap_or_default());
+            let limited = entries
+                .into_iter()
+                .take(settings.max_rich_history_items)
+                .collect::<Vec<_>>();
+            if limited.is_empty() {
+                self.add_disabled_item(&submenu, t(lang, "no_rich_history"));
+            } else {
+                let direct_count = settings
+                    .visible_rich_history_items
+                    .min(settings.max_rich_history_items)
+                    .min(limited.len());
+
+                for entry in limited.iter().take(direct_count) {
+                    self.add_rich_entry_item(&submenu, entry, lang, settings.menu_width);
                 }
-                entries => {
-                    for entry in entries.iter().take(settings.max_history_items) {
-                        let kind = match entry.kind {
-                            storage::RichClipboardKind::Image => t(lang, "kind_image"),
-                            storage::RichClipboardKind::File => t(lang, "kind_file"),
-                        };
-                        if entry.kind == storage::RichClipboardKind::Image
-                            && let Some(data) = preview_image_data(entry)
-                        {
-                            self.ivars()
-                                .image_previews
-                                .borrow_mut()
-                                .insert(entry.id as isize, data);
-                        }
-                        let prefix = format!("{kind}: ");
-                        let preview_units = preview_units_for_prefix(settings.menu_width, &prefix);
-                        let (label, truncated) =
-                            preview_with_truncation(&entry.label, preview_units);
-                        let title = format!("{prefix}{label}");
-                        self.add_action_item_with_tooltip(
-                            &submenu,
-                            &title,
-                            sel!(copyRichHistoryItem:),
-                            entry.id as isize,
-                            truncated.then_some(entry.label.as_str()),
+
+                if direct_count < limited.len() {
+                    for (chunk_index, chunk) in limited[direct_count..]
+                        .chunks(settings.visible_rich_history_items)
+                        .enumerate()
+                    {
+                        let chunk_start =
+                            direct_count + (chunk_index * settings.visible_rich_history_items);
+                        let chunk_end = chunk_start + chunk.len();
+                        let title = format!("{} - {}", chunk_start + 1, chunk_end);
+                        let chunk_item = self.new_menu_item(&title);
+                        let chunk_menu = NSMenu::initWithTitle(
+                            NSMenu::alloc(self.mtm()),
+                            &NSString::from_str(&title),
                         );
+                        self.configure_menu_appearance(&chunk_menu);
+                        chunk_menu.setDelegate(Some(ProtocolObject::from_ref(self)));
+                        for entry in chunk {
+                            self.add_rich_entry_item(&chunk_menu, entry, lang, settings.menu_width);
+                        }
+                        chunk_item.setSubmenu(Some(&chunk_menu));
+                        submenu.addItem(&chunk_item);
                     }
                 }
             }
@@ -707,6 +737,38 @@ impl MenuDelegate {
 
         submenu_item.setSubmenu(Some(&submenu));
         menu.addItem(&submenu_item);
+    }
+
+    fn add_rich_entry_item(
+        &self,
+        menu: &NSMenu,
+        entry: &RichHistoryEntry,
+        lang: Language,
+        menu_width: usize,
+    ) {
+        let kind = match entry.kind {
+            storage::RichClipboardKind::Image => t(lang, "kind_image"),
+            storage::RichClipboardKind::File => t(lang, "kind_file"),
+        };
+        if entry.kind == storage::RichClipboardKind::Image
+            && let Some(data) = preview_image_data(entry)
+        {
+            self.ivars()
+                .image_previews
+                .borrow_mut()
+                .insert(entry.id as isize, data);
+        }
+        let prefix = format!("{kind}: ");
+        let preview_units = preview_units_for_prefix(menu_width, &prefix);
+        let (label, truncated) = preview_with_truncation(&entry.label, preview_units);
+        let title = format!("{prefix}{label}");
+        self.add_action_item_with_tooltip(
+            menu,
+            &title,
+            sel!(copyRichHistoryItem:),
+            entry.id as isize,
+            truncated.then_some(entry.label.as_str()),
+        );
     }
 
     fn ensure_preview_window(&self) -> (Retained<NSWindow>, Retained<NSImageView>) {
@@ -909,7 +971,7 @@ impl MenuDelegate {
         let settings = storage::normalize_settings(settings);
         if let Some(store) = self.store() {
             match store.save_settings(&settings) {
-                Ok(()) => match prune_store_history(store, settings.max_history_items) {
+                Ok(()) => match prune_store_history(store, &settings) {
                     Ok(()) => self.clear_error(),
                     Err(err) => self.set_error(err),
                 },
@@ -1013,6 +1075,8 @@ struct PreferencesControls {
     view: Retained<NSView>,
     history_limit_field: Retained<NSTextField>,
     visible_count_field: Retained<NSTextField>,
+    rich_history_limit_field: Retained<NSTextField>,
+    rich_visible_count_field: Retained<NSTextField>,
     menu_width_field: Retained<NSTextField>,
     language_popup: Retained<NSPopUpButton>,
     rich_popup: Retained<NSPopUpButton>,
@@ -1147,20 +1211,34 @@ fn build_preferences_controls(
     lang: Language,
     mtm: MainThreadMarker,
 ) -> PreferencesControls {
+    // 自上而下布局：每行 40px，预留底部 16px 边距，行高 24px。
+    const ROW_HEIGHT: f64 = 40.0;
+    const PANEL_WIDTH: f64 = 360.0;
+    const TOTAL_ROWS: f64 = 7.0; // 语言、文本上限、文本展示、图片上限、图片展示、菜单宽度、富文本开关
+    const PANEL_HEIGHT: f64 = TOTAL_ROWS * ROW_HEIGHT + 16.0;
+
     let view = NSView::initWithFrame(
         NSView::alloc(mtm),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(360.0, 216.0)),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
+        ),
     );
+
+    let row_y = |row: usize| PANEL_HEIGHT - 24.0 - row as f64 * ROW_HEIGHT;
 
     let language_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "language")), mtm);
     language_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, 176.0),
-        NSSize::new(120.0, 24.0),
+        NSPoint::new(0.0, row_y(0)),
+        NSSize::new(140.0, 24.0),
     ));
     let language_popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, 172.0), NSSize::new(180.0, 28.0)),
+        NSRect::new(
+            NSPoint::new(150.0, row_y(0) - 4.0),
+            NSSize::new(180.0, 28.0),
+        ),
         false,
     );
     language_popup.addItemWithTitle(&NSString::from_str("English"));
@@ -1173,12 +1251,12 @@ fn build_preferences_controls(
     let history_limit_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "history_limit")), mtm);
     history_limit_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, 136.0),
+        NSPoint::new(0.0, row_y(1)),
         NSSize::new(140.0, 24.0),
     ));
     let history_limit_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, 132.0), NSSize::new(90.0, 24.0)),
+        NSRect::new(NSPoint::new(150.0, row_y(1)), NSSize::new(90.0, 24.0)),
     );
     history_limit_field
         .setStringValue(&NSString::from_str(&settings.max_history_items.to_string()));
@@ -1186,38 +1264,69 @@ fn build_preferences_controls(
     let visible_count_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "visible_count")), mtm);
     visible_count_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, 96.0),
+        NSPoint::new(0.0, row_y(2)),
         NSSize::new(140.0, 24.0),
     ));
     let visible_count_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, 92.0), NSSize::new(90.0, 24.0)),
+        NSRect::new(NSPoint::new(150.0, row_y(2)), NSSize::new(90.0, 24.0)),
     );
     visible_count_field.setStringValue(&NSString::from_str(
         &settings.visible_history_items.to_string(),
     ));
 
+    let rich_history_limit_label =
+        NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_history_limit")), mtm);
+    rich_history_limit_label.setFrame(NSRect::new(
+        NSPoint::new(0.0, row_y(3)),
+        NSSize::new(140.0, 24.0),
+    ));
+    let rich_history_limit_field = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(150.0, row_y(3)), NSSize::new(90.0, 24.0)),
+    );
+    rich_history_limit_field.setStringValue(&NSString::from_str(
+        &settings.max_rich_history_items.to_string(),
+    ));
+
+    let rich_visible_count_label =
+        NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_visible_count")), mtm);
+    rich_visible_count_label.setFrame(NSRect::new(
+        NSPoint::new(0.0, row_y(4)),
+        NSSize::new(140.0, 24.0),
+    ));
+    let rich_visible_count_field = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(150.0, row_y(4)), NSSize::new(90.0, 24.0)),
+    );
+    rich_visible_count_field.setStringValue(&NSString::from_str(
+        &settings.visible_rich_history_items.to_string(),
+    ));
+
     let menu_width_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "menu_width")), mtm);
     menu_width_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, 56.0),
+        NSPoint::new(0.0, row_y(5)),
         NSSize::new(140.0, 24.0),
     ));
     let menu_width_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, 52.0), NSSize::new(90.0, 24.0)),
+        NSRect::new(NSPoint::new(150.0, row_y(5)), NSSize::new(90.0, 24.0)),
     );
     menu_width_field.setStringValue(&NSString::from_str(&settings.menu_width.to_string()));
 
     let rich_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_capture_setting")), mtm);
     rich_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, 16.0),
+        NSPoint::new(0.0, row_y(6)),
         NSSize::new(140.0, 24.0),
     ));
     let rich_popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, 12.0), NSSize::new(180.0, 28.0)),
+        NSRect::new(
+            NSPoint::new(150.0, row_y(6) - 4.0),
+            NSSize::new(180.0, 28.0),
+        ),
         false,
     );
     rich_popup.addItemWithTitle(&NSString::from_str(t(lang, "enabled")));
@@ -1234,6 +1343,10 @@ fn build_preferences_controls(
     view.addSubview(&history_limit_field);
     view.addSubview(&visible_count_label);
     view.addSubview(&visible_count_field);
+    view.addSubview(&rich_history_limit_label);
+    view.addSubview(&rich_history_limit_field);
+    view.addSubview(&rich_visible_count_label);
+    view.addSubview(&rich_visible_count_field);
     view.addSubview(&menu_width_label);
     view.addSubview(&menu_width_field);
     view.addSubview(&rich_label);
@@ -1243,6 +1356,8 @@ fn build_preferences_controls(
         view,
         history_limit_field,
         visible_count_field,
+        rich_history_limit_field,
+        rich_visible_count_field,
         menu_width_field,
         language_popup,
         rich_popup,
@@ -1262,6 +1377,14 @@ fn read_preferences_controls(controls: &PreferencesControls) -> AppSettings {
         &nsstring_to_string(&controls.visible_count_field.stringValue()),
         AppSettings::default().visible_history_items,
     );
+    let max_rich_history_items = parse_positive_usize(
+        &nsstring_to_string(&controls.rich_history_limit_field.stringValue()),
+        AppSettings::default().max_rich_history_items,
+    );
+    let visible_rich_history_items = parse_positive_usize(
+        &nsstring_to_string(&controls.rich_visible_count_field.stringValue()),
+        AppSettings::default().visible_rich_history_items,
+    );
     let menu_width = parse_positive_usize(
         &nsstring_to_string(&controls.menu_width_field.stringValue()),
         AppSettings::default().menu_width,
@@ -1271,17 +1394,19 @@ fn read_preferences_controls(controls: &PreferencesControls) -> AppSettings {
         capture_rich_clipboard: controls.rich_popup.indexOfSelectedItem() == 0,
         max_history_items,
         visible_history_items,
+        max_rich_history_items,
+        visible_rich_history_items,
         menu_width,
     })
 }
 
-fn prune_store_history(store: &Store, max_items: usize) -> Result<(), String> {
+fn prune_store_history(store: &Store, settings: &AppSettings) -> Result<(), String> {
     let mut history = store.load_history()?;
-    storage::prune_history(&mut history, max_items);
+    storage::prune_history(&mut history, settings.max_history_items);
     store.save_history(&history)?;
 
     let mut rich_history = store.load_rich_history()?;
-    storage::prune_rich_history(&mut rich_history, max_items);
+    storage::prune_rich_history(&mut rich_history, settings.max_rich_history_items);
     store.save_rich_history(&rich_history)
 }
 
@@ -1423,6 +1548,8 @@ fn t(language: Language, key: &str) -> &'static str {
             "language" => "Language",
             "history_limit" => "History limit",
             "visible_count" => "Visible recent items",
+            "rich_history_limit" => "Image/file limit",
+            "rich_visible_count" => "Visible image/file items",
             "menu_width" => "Menu width",
             "rich_capture_setting" => "Images and files",
             "enabled" => "Enabled",
@@ -1468,6 +1595,8 @@ fn t(language: Language, key: &str) -> &'static str {
             "language" => "语言",
             "history_limit" => "历史条数上限",
             "visible_count" => "顶部直接显示",
+            "rich_history_limit" => "图片/文件上限",
+            "rich_visible_count" => "图片/文件直显数量",
             "menu_width" => "菜单宽度",
             "rich_capture_setting" => "图片/文件剪贴板",
             "enabled" => "开启",

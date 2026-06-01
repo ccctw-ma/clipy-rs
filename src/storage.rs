@@ -63,6 +63,8 @@ pub struct AppSettings {
     pub capture_rich_clipboard: bool,
     pub max_history_items: usize,
     pub visible_history_items: usize,
+    pub max_rich_history_items: usize,
+    pub visible_rich_history_items: usize,
     pub menu_width: usize,
 }
 
@@ -73,6 +75,8 @@ impl Default for AppSettings {
             capture_rich_clipboard: true,
             max_history_items: 40,
             visible_history_items: 10,
+            max_rich_history_items: 20,
+            visible_rich_history_items: 10,
             menu_width: 260,
         }
     }
@@ -490,10 +494,12 @@ fn encode_settings(settings: &AppSettings) -> String {
         Language::Chinese => "zh-CN",
     };
     format!(
-        "language={language}\ncapture_rich_clipboard={}\nmax_history_items={}\nvisible_history_items={}\nmenu_width={}\n",
+        "language={language}\ncapture_rich_clipboard={}\nmax_history_items={}\nvisible_history_items={}\nmax_rich_history_items={}\nvisible_rich_history_items={}\nmenu_width={}\n",
         settings.capture_rich_clipboard,
         settings.max_history_items,
         settings.visible_history_items,
+        settings.max_rich_history_items,
+        settings.visible_rich_history_items,
         settings.menu_width,
     )
 }
@@ -524,6 +530,16 @@ fn decode_settings(text: &str) -> AppSettings {
                     settings.visible_history_items = parsed;
                 }
             }
+            "max_rich_history_items" => {
+                if let Ok(parsed) = value.trim().parse::<usize>() {
+                    settings.max_rich_history_items = parsed;
+                }
+            }
+            "visible_rich_history_items" => {
+                if let Ok(parsed) = value.trim().parse::<usize>() {
+                    settings.visible_rich_history_items = parsed;
+                }
+            }
             "menu_width" => {
                 if let Ok(parsed) = value.trim().parse::<usize>() {
                     settings.menu_width = parsed;
@@ -540,6 +556,11 @@ pub fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.visible_history_items = settings.visible_history_items.clamp(1, 100);
     if settings.visible_history_items > settings.max_history_items {
         settings.visible_history_items = settings.max_history_items;
+    }
+    settings.max_rich_history_items = settings.max_rich_history_items.clamp(1, 500);
+    settings.visible_rich_history_items = settings.visible_rich_history_items.clamp(1, 100);
+    if settings.visible_rich_history_items > settings.max_rich_history_items {
+        settings.visible_rich_history_items = settings.max_rich_history_items;
     }
     settings.menu_width = settings.menu_width.clamp(180, 600);
     settings
@@ -659,6 +680,8 @@ mod tests {
             capture_rich_clipboard: false,
             max_history_items: 60,
             visible_history_items: 15,
+            max_rich_history_items: 30,
+            visible_rich_history_items: 8,
             menu_width: 280,
         };
 
@@ -668,11 +691,13 @@ mod tests {
     #[test]
     fn settings_are_normalized() {
         let settings = decode_settings(
-            "language=en\ncapture_rich_clipboard=true\nmax_history_items=0\nvisible_history_items=999\nmenu_width=9999\n",
+            "language=en\ncapture_rich_clipboard=true\nmax_history_items=0\nvisible_history_items=999\nmax_rich_history_items=0\nvisible_rich_history_items=999\nmenu_width=9999\n",
         );
 
         assert_eq!(settings.max_history_items, 1);
         assert_eq!(settings.visible_history_items, 1);
+        assert_eq!(settings.max_rich_history_items, 1);
+        assert_eq!(settings.visible_rich_history_items, 1);
         assert_eq!(settings.menu_width, 600);
     }
 
