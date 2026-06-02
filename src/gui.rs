@@ -1503,7 +1503,7 @@ fn preview_image_data(entry: &RichHistoryEntry) -> Option<Vec<u8>> {
 /// 模板图（template image）会在 macOS 菜单栏中按当前主题自动渲染成
 /// 黑色（浅色菜单栏）或白色（深色菜单栏）的单色 logo。
 fn load_status_bar_image() -> Option<Retained<NSImage>> {
-    const STATUS_BAR_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
+    const STATUS_BAR_ICON_BYTES: &[u8] = include_bytes!("../icons/menubar.png");
     let ns_data = unsafe {
         NSData::dataWithBytes_length(
             STATUS_BAR_ICON_BYTES.as_ptr().cast::<c_void>(),
