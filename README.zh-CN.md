@@ -385,3 +385,7 @@ $HOME/.cargo/bin/clipy-rs gui
 
 - 应用排除规则
 - iCloud 同步
+
+## 开源许可
+
+本项目基于 [MIT 许可证](LICENSE) 开源。

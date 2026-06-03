@@ -214,20 +214,6 @@ pub fn upsert_history(entries: &mut Vec<HistoryEntry>, content: String) -> bool 
     }
 }
 
-pub fn prune_history(entries: &mut Vec<HistoryEntry>, max_items: usize) {
-    if max_items == 0 {
-        entries.retain(|entry| entry.pinned);
-        return;
-    }
-    while entries.len() > max_items {
-        if let Some(index) = entries.iter().rposition(|entry| !entry.pinned) {
-            entries.remove(index);
-        } else {
-            entries.pop();
-        }
-    }
-}
-
 pub fn upsert_snippet(snippets: &mut Vec<SnippetEntry>, name: String, content: String) -> bool {
     let now = now_millis();
     if let Some(index) = snippets.iter().position(|snippet| snippet.name == name) {
@@ -278,20 +264,6 @@ pub fn upsert_rich_history(
         entry.updated_at = now;
         entries.insert(0, entry);
         true
-    }
-}
-
-pub fn prune_rich_history(entries: &mut Vec<RichHistoryEntry>, max_items: usize) {
-    if max_items == 0 {
-        entries.retain(|entry| entry.pinned);
-        return;
-    }
-    while entries.len() > max_items {
-        if let Some(index) = entries.iter().rposition(|entry| !entry.pinned) {
-            entries.remove(index);
-        } else {
-            entries.pop();
-        }
     }
 }
 
@@ -728,18 +700,6 @@ mod tests {
 
         assert_eq!(snippets.len(), 1);
         assert_eq!(snippets[0].content, "new");
-    }
-
-    #[test]
-    fn pruning_keeps_pinned_items() {
-        let mut entries = vec![
-            entry(1, "a", false),
-            entry(2, "b", true),
-            entry(3, "c", false),
-        ];
-        prune_history(&mut entries, 1);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].content, "b");
     }
 
     #[test]

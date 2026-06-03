@@ -415,3 +415,7 @@ Not implemented yet:
 
 - app exclusion rules
 - iCloud sync
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

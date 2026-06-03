@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use crate::storage::{HistoryEntry, SnippetEntry, Store};
 
-const DEFAULT_MAX_ITEMS: usize = 100;
 const DEFAULT_INTERVAL_MS: u64 = 750;
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
 
@@ -76,17 +75,15 @@ fn default_command() -> String {
 
 fn cmd_capture(store: &Store, args: &[String]) -> Result<(), String> {
     let allow_sensitive = has_flag(args, "--allow-sensitive");
-    let max_items = parse_usize_flag(args, "--max-items")?.unwrap_or(DEFAULT_MAX_ITEMS);
     let max_bytes = parse_usize_flag(args, "--max-bytes")?.unwrap_or(DEFAULT_MAX_BYTES);
     let text = clipboard::read_text()?;
-    let result = capture_text(store, text, allow_sensitive, max_items, max_bytes)?;
+    let result = capture_text(store, text, allow_sensitive, max_bytes)?;
     println!("{result}");
     Ok(())
 }
 
 fn cmd_watch(store: &Store, args: &[String]) -> Result<(), String> {
     let allow_sensitive = has_flag(args, "--allow-sensitive");
-    let max_items = parse_usize_flag(args, "--max-items")?.unwrap_or(DEFAULT_MAX_ITEMS);
     let max_bytes = parse_usize_flag(args, "--max-bytes")?.unwrap_or(DEFAULT_MAX_BYTES);
     let interval_ms = parse_u64_flag(args, "--interval-ms")?.unwrap_or(DEFAULT_INTERVAL_MS);
     if interval_ms < 100 {
@@ -105,7 +102,7 @@ fn cmd_watch(store: &Store, args: &[String]) -> Result<(), String> {
             Ok(text) => {
                 if text != last_seen {
                     last_seen = text.clone();
-                    match capture_text(store, text, allow_sensitive, max_items, max_bytes) {
+                    match capture_text(store, text, allow_sensitive, max_bytes) {
                         Ok(message) if !message.starts_with("ignored") => println!("{message}"),
                         Ok(_) => {}
                         Err(err) => eprintln!("capture failed: {err}"),
@@ -357,7 +354,6 @@ fn capture_text(
     store: &Store,
     text: String,
     allow_sensitive: bool,
-    max_items: usize,
     max_bytes: usize,
 ) -> Result<String, String> {
     let text = normalize_clipboard_text(text);
@@ -380,7 +376,7 @@ fn capture_text(
     let captured_len = text.len();
     let mut entries = store.load_history()?;
     let inserted = storage::upsert_history(&mut entries, text);
-    storage::prune_history(&mut entries, max_items);
+    // 历史永不裁剪：保留全部条目，展示数量由 GUI 设置控制。
     store.save_history(&entries)?;
     if inserted {
         Ok(format!(
@@ -787,7 +783,7 @@ fn print_help() {
         r#"clipy-rs - small macOS clipboard history tool
 
 USAGE
-  clipy-rs capture [--allow-sensitive] [--max-items N] [--max-bytes N]
+  clipy-rs capture [--allow-sensitive] [--max-bytes N]
   clipy-rs watch [--interval-ms N] [--allow-sensitive]
   clipy-rs list [query] [--limit N] [--full]
   clipy-rs pick [query] [--paste]

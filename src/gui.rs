@@ -8,13 +8,18 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSEvent, NSImage, NSImageScaling, NSImageView,
-    NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton, NSScreen, NSStatusBar, NSStatusItem,
-    NSTextField, NSVariableStatusItemLength, NSView, NSWindow, NSWindowStyleMask,
+    NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBorderType, NSButton, NSButtonType,
+    NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate, NSEvent,
+    NSFloatingWindowLevel, NSFocusRingType, NSFont, NSImage, NSImageScaling, NSImageView,
+    NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSNormalWindowLevel, NSPopUpButton,
+    NSScreen, NSScrollView, NSStatusBar, NSStatusItem, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSTextView, NSVariableStatusItemLength, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, NSTimer,
+    MainThreadMarker, NSArray, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString, NSTimer,
 };
 
 use crate::clipboard;
@@ -28,9 +33,17 @@ const MENU_WIDTH_TEXT_PADDING: usize = 56;
 const MENU_WIDTH_UNIT_PIXELS: usize = 5;
 const ELLIPSIS: &str = "...";
 const ELLIPSIS_UNITS: usize = 3;
+const MENU_SCREEN_MARGIN: f64 = 8.0;
+const SEARCH_PANEL_WIDTH: f64 = 660.0;
+const SEARCH_PANEL_HEIGHT: f64 = 560.0;
+const SEARCH_PANEL_PADDING: f64 = 18.0;
+const SEARCH_ROW_HEIGHT: f64 = 42.0;
+const SEARCH_MAX_CANDIDATES: usize = 20;
+const PREVIEW_PANEL_SIZE: f64 = 360.0;
+const PREFERENCES_PANEL_WIDTH: f64 = 700.0;
+const PREFERENCES_PANEL_HEIGHT: f64 = 560.0;
 const MENU_ITEM_HEIGHT_ESTIMATE: f64 = 22.0;
 const MENU_VERTICAL_PADDING_ESTIMATE: f64 = 16.0;
-const MENU_SCREEN_MARGIN: f64 = 8.0;
 
 type OSStatus = i32;
 type EventTargetRef = *mut c_void;
@@ -107,6 +120,12 @@ struct MenuDelegateIvars {
     preview_window: OnceCell<Retained<NSWindow>>,
     preview_image_view: OnceCell<Retained<NSImageView>>,
     image_previews: RefCell<std::collections::HashMap<isize, Vec<u8>>>,
+    preferences_window: RefCell<Option<Retained<NSWindow>>>,
+    preferences_controls: RefCell<Option<PreferencesControls>>,
+    search_window: OnceCell<Retained<NSWindow>>,
+    search_field: OnceCell<Retained<NSTextField>>,
+    search_results_view: OnceCell<Retained<NSView>>,
+    search_entries: RefCell<Vec<HistoryEntry>>,
 }
 
 define_class!(
@@ -118,6 +137,9 @@ define_class!(
     unsafe impl NSObjectProtocol for MenuDelegate {}
 
     unsafe impl NSMenuDelegate for MenuDelegate {
+        #[unsafe(method(menuWillOpen:))]
+        fn menu_will_open(&self, _menu: &NSMenu) {}
+
         #[unsafe(method(menu:willHighlightItem:))]
         fn menu_will_highlight_item(&self, _menu: &NSMenu, item: Option<&NSMenuItem>) {
             match item {
@@ -129,6 +151,13 @@ define_class!(
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, _menu: &NSMenu) {
             self.hide_image_preview();
+        }
+    }
+
+    unsafe impl NSWindowDelegate for MenuDelegate {
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            self.close_search_panel();
         }
     }
 
@@ -247,6 +276,25 @@ define_class!(
             self.show_preferences_panel();
         }
 
+        #[unsafe(method(savePreferences:))]
+        fn save_preferences(&self, _sender: &NSButton) {
+            let settings = self
+                .ivars()
+                .preferences_controls
+                .borrow()
+                .as_ref()
+                .map(read_preferences_controls);
+            if let Some(settings) = settings {
+                self.persist_settings(settings);
+            }
+            self.close_preferences_panel();
+        }
+
+        #[unsafe(method(cancelPreferences:))]
+        fn cancel_preferences(&self, _sender: &NSButton) {
+            self.close_preferences_panel();
+        }
+
         #[unsafe(method(openNotes:))]
         fn open_notes(&self, _sender: &NSMenuItem) {
             match Command::new("open").args(["-a", "Notes"]).status() {
@@ -266,7 +314,54 @@ define_class!(
             let app = NSApplication::sharedApplication(self.mtm());
             app.terminate(None);
         }
+
+        #[unsafe(method(openSearchPanel:))]
+        fn open_search_panel_action(&self, _sender: &NSMenuItem) {
+            self.close_status_menu();
+            self.open_search_panel();
+        }
+
+        #[unsafe(method(cancelOperation:))]
+        fn cancel_operation(&self, _sender: Option<&AnyObject>) {
+            self.close_search_panel();
+        }
+
+        #[unsafe(method(searchPanelRowClicked:))]
+        fn search_panel_row_clicked(&self, sender: &NSButton) {
+            let id = sender.tag();
+            if id > 0 {
+                self.activate_search_entry(id as u64);
+            }
+        }
     }
+
+    unsafe impl NSControlTextEditingDelegate for MenuDelegate {
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, _notification: &NSNotification) {
+            self.refresh_search_candidates();
+        }
+
+        // 处理搜索框里的特殊按键：回车激活首个候选项、Esc 关闭浮层。
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn control_do_command(
+            &self,
+            _control: &NSControl,
+            _text_view: &NSTextView,
+            command: objc2::runtime::Sel,
+        ) -> objc2::runtime::Bool {
+            if command == sel!(insertNewline:) {
+                self.activate_first_search_candidate();
+                return objc2::runtime::Bool::YES;
+            }
+            if command == sel!(cancelOperation:) {
+                self.close_search_panel();
+                return objc2::runtime::Bool::YES;
+            }
+            objc2::runtime::Bool::NO
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for MenuDelegate {}
 );
 
 impl MenuDelegate {
@@ -314,6 +409,7 @@ impl MenuDelegate {
 
         let menu =
             NSMenu::initWithTitle(NSMenu::alloc(self.mtm()), &NSString::from_str("clipy-rs"));
+        menu.setDelegate(Some(ProtocolObject::from_ref(self)));
         item.setMenu(Some(&menu));
 
         let _ = self.ivars().status_item.set(item);
@@ -421,7 +517,7 @@ impl MenuDelegate {
         if settings.capture_rich_clipboard {
             match clipboard::read_rich_clipboard(CAPTURE_MAX_RICH_BYTES) {
                 Ok(Some(entry)) => {
-                    match capture_rich(store, entry, settings.max_rich_history_items) {
+                    match capture_rich(store, entry) {
                         Ok(CaptureStatus::Changed) => {
                             self.clear_error();
                             self.rebuild_menu();
@@ -451,7 +547,7 @@ impl MenuDelegate {
                     }
                     return;
                 }
-                match capture_text(store, text, settings.max_history_items) {
+                match capture_text(store, text) {
                     Ok(CaptureStatus::Changed) => {
                         self.clear_error();
                         self.rebuild_menu();
@@ -505,6 +601,7 @@ impl MenuDelegate {
         }
 
         menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
+        self.add_action_item(menu, t(lang, "search_history"), sel!(openSearchPanel:), 0);
         self.add_favorites_menu(menu, lang);
         self.add_rich_history_menu(menu, lang);
         self.add_action_item(menu, t(lang, "notes"), sel!(openNotes:), 0);
@@ -784,7 +881,10 @@ impl MenuDelegate {
             .ivars()
             .preview_window
             .get_or_init(|| {
-                let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 240.0));
+                let rect = NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(PREVIEW_PANEL_SIZE, PREVIEW_PANEL_SIZE),
+                );
                 let window: Retained<NSWindow> = unsafe {
                     NSWindow::initWithContentRect_styleMask_backing_defer(
                         NSWindow::alloc(self.mtm()),
@@ -794,11 +894,23 @@ impl MenuDelegate {
                         false,
                     )
                 };
-                window.setLevel(objc2_app_kit::NSPopUpMenuWindowLevel);
+                window.setLevel(NSFloatingWindowLevel);
                 window.setIgnoresMouseEvents(true);
                 window.setHasShadow(true);
                 window.setOpaque(false);
-                window.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+                window.setBackgroundColor(Some(&NSColor::clearColor()));
+
+                let root =
+                    NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
+                root.setMaterial(NSVisualEffectMaterial::HUDWindow);
+                root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+                root.setState(NSVisualEffectState::Active);
+                root.setWantsLayer(true);
+                if let Some(layer) = root.layer() {
+                    layer.setCornerRadius(18.0);
+                    layer.setMasksToBounds(true);
+                }
+                window.setContentView(Some(&root));
                 window
             })
             .clone();
@@ -807,9 +919,22 @@ impl MenuDelegate {
             .ivars()
             .preview_image_view
             .get_or_init(|| {
-                let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 240.0));
+                let inset = 16.0;
+                let rect = NSRect::new(
+                    NSPoint::new(inset, inset),
+                    NSSize::new(
+                        PREVIEW_PANEL_SIZE - inset * 2.0,
+                        PREVIEW_PANEL_SIZE - inset * 2.0,
+                    ),
+                );
                 let view = NSImageView::initWithFrame(NSImageView::alloc(self.mtm()), rect);
                 view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+                view.setWantsLayer(true);
+                if let Some(layer) = view.layer() {
+                    layer.setCornerRadius(12.0);
+                    layer.setMasksToBounds(true);
+                    layer.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
+                }
                 if let Some(content) = window.contentView() {
                     content.addSubview(&view);
                 }
@@ -948,21 +1073,106 @@ impl MenuDelegate {
         let settings = self.settings();
         let lang = settings.language;
         let controls = build_preferences_controls(settings, lang, self.mtm());
-        let alert = NSAlert::new(self.mtm());
-        alert.setAlertStyle(NSAlertStyle::Informational);
-        alert.setMessageText(&NSString::from_str(t(lang, "preferences_title")));
-        alert.setInformativeText(&NSString::from_str(t(lang, "preferences_help")));
-        alert.setAccessoryView(Some(&controls.view));
-        alert.addButtonWithTitle(&NSString::from_str(t(lang, "save")));
-        alert.addButtonWithTitle(&NSString::from_str(t(lang, "cancel")));
-        alert.layout();
+        let rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(PREFERENCES_PANEL_WIDTH, PREFERENCES_PANEL_HEIGHT),
+        );
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(self.mtm()),
+                rect,
+                NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        window.setTitle(&NSString::from_str(t(lang, "preferences_title")));
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        window.setTitlebarAppearsTransparent(true);
+        window.setMovableByWindowBackground(true);
+        window.setLevel(NSNormalWindowLevel);
+        window.setHasShadow(true);
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+
+        let root = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
+        root.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        root.setState(NSVisualEffectState::Active);
+        root.setWantsLayer(true);
+        if let Some(layer) = root.layer() {
+            layer.setCornerRadius(22.0);
+            layer.setMasksToBounds(true);
+        }
+
+        let title = NSTextField::labelWithString(
+            &NSString::from_str(t(lang, "preferences_title")),
+            self.mtm(),
+        );
+        title.setFrame(NSRect::new(
+            NSPoint::new(32.0, PREFERENCES_PANEL_HEIGHT - 70.0),
+            NSSize::new(PREFERENCES_PANEL_WIDTH - 64.0, 30.0),
+        ));
+        title.setFont(Some(&NSFont::systemFontOfSize_weight(24.0, 0.35)));
+        title.setTextColor(Some(&NSColor::labelColor()));
+        title.setUsesSingleLineMode(true);
+        title.setLineBreakMode(NSLineBreakMode::ByClipping);
+        root.addSubview(&title);
+
+        let help = NSTextField::labelWithString(
+            &NSString::from_str(t(lang, "preferences_help")),
+            self.mtm(),
+        );
+        help.setFrame(NSRect::new(
+            NSPoint::new(32.0, PREFERENCES_PANEL_HEIGHT - 140.0),
+            NSSize::new(PREFERENCES_PANEL_WIDTH - 64.0, 54.0),
+        ));
+        help.setFont(Some(&NSFont::systemFontOfSize(15.0)));
+        help.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        help.setUsesSingleLineMode(false);
+        help.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        root.addSubview(&help);
+
+        controls.view.setFrame(NSRect::new(
+            NSPoint::new(32.0, 88.0),
+            NSSize::new(PREFERENCES_PANEL_WIDTH - 64.0, 310.0),
+        ));
+        root.addSubview(&controls.view);
+
+        let cancel = preferences_button(
+            t(lang, "cancel"),
+            NSPoint::new(PREFERENCES_PANEL_WIDTH - 292.0, 30.0),
+            sel!(cancelPreferences:),
+            self,
+            self.mtm(),
+        );
+        let save = preferences_button(
+            t(lang, "save"),
+            NSPoint::new(PREFERENCES_PANEL_WIDTH - 152.0, 30.0),
+            sel!(savePreferences:),
+            self,
+            self.mtm(),
+        );
+        save.setKeyEquivalent(&NSString::from_str("\r"));
+        root.addSubview(&cancel);
+        root.addSubview(&save);
+
+        window.setContentView(Some(&root));
+        window.center();
 
         let app = NSApplication::sharedApplication(self.mtm());
         app.activate();
+        window.makeKeyAndOrderFront(None);
 
-        if alert.runModal() == NSAlertFirstButtonReturn {
-            self.persist_settings(read_preferences_controls(&controls));
+        *self.ivars().preferences_controls.borrow_mut() = Some(controls);
+        *self.ivars().preferences_window.borrow_mut() = Some(window);
+    }
+
+    fn close_preferences_panel(&self) {
+        if let Some(window) = self.ivars().preferences_window.borrow_mut().take() {
+            window.orderOut(None);
         }
+        *self.ivars().preferences_controls.borrow_mut() = None;
     }
 
     fn store(&self) -> Option<&Store> {
@@ -979,10 +1189,7 @@ impl MenuDelegate {
         let settings = storage::normalize_settings(settings);
         if let Some(store) = self.store() {
             match store.save_settings(&settings) {
-                Ok(()) => match prune_store_history(store, &settings) {
-                    Ok(()) => self.clear_error(),
-                    Err(err) => self.set_error(err),
-                },
+                Ok(()) => self.clear_error(),
                 Err(err) => self.set_error(err),
             }
         }
@@ -1005,6 +1212,310 @@ impl MenuDelegate {
 
     fn clear_error(&self) {
         *self.ivars().last_error.borrow_mut() = None;
+    }
+
+    fn close_status_menu(&self) {
+        if let Some(status_item) = self.ivars().status_item.get()
+            && let Some(menu) = status_item.menu(self.mtm())
+        {
+            menu.cancelTrackingWithoutAnimation();
+        }
+    }
+
+    fn open_search_panel(&self) {
+        let (window, field, _) = self.ensure_search_panel();
+        field.setStringValue(&NSString::from_str(""));
+        self.refresh_search_candidates();
+        position_search_window(&window, self.mtm());
+
+        let app = NSApplication::sharedApplication(self.mtm());
+        app.activate();
+        window.makeKeyAndOrderFront(None);
+        let _: bool = unsafe { msg_send![&*window, makeFirstResponder: &*field] };
+    }
+
+    fn close_search_panel(&self) {
+        if let Some(window) = self.ivars().search_window.get() {
+            window.orderOut(None);
+        }
+    }
+
+    fn ensure_search_panel(&self) -> (Retained<NSWindow>, Retained<NSTextField>, Retained<NSView>) {
+        let window = self
+            .ivars()
+            .search_window
+            .get_or_init(|| self.build_search_window())
+            .clone();
+        let field = self
+            .ivars()
+            .search_field
+            .get()
+            .expect("search field is initialized with the search window")
+            .clone();
+        let results_view = self
+            .ivars()
+            .search_results_view
+            .get()
+            .expect("search results view is initialized with the search window")
+            .clone();
+        (window, field, results_view)
+    }
+
+    fn build_search_window(&self) -> Retained<NSWindow> {
+        let rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(SEARCH_PANEL_WIDTH, SEARCH_PANEL_HEIGHT),
+        );
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView;
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(self.mtm()),
+                rect,
+                style,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        window.setTitle(&NSString::from_str(t(
+            self.settings().language,
+            "search_history",
+        )));
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        window.setTitlebarAppearsTransparent(true);
+        window.setMovableByWindowBackground(true);
+        window.setLevel(NSNormalWindowLevel);
+        window.setHasShadow(true);
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setDelegate(Some(ProtocolObject::from_ref(self)));
+
+        let root = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
+        root.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        root.setState(NSVisualEffectState::Active);
+        root.setWantsLayer(true);
+        if let Some(layer) = root.layer() {
+            layer.setCornerRadius(18.0);
+            layer.setMasksToBounds(true);
+        }
+
+        let title = NSTextField::labelWithString(
+            &NSString::from_str(t(self.settings().language, "search_history")),
+            self.mtm(),
+        );
+        title.setFrame(NSRect::new(
+            NSPoint::new(SEARCH_PANEL_PADDING, SEARCH_PANEL_HEIGHT - 44.0),
+            NSSize::new(SEARCH_PANEL_WIDTH - SEARCH_PANEL_PADDING * 2.0, 26.0),
+        ));
+        title.setFont(Some(&NSFont::systemFontOfSize_weight(17.0, 0.45)));
+        title.setTextColor(Some(&NSColor::labelColor()));
+        root.addSubview(&title);
+
+        let search_box = NSView::initWithFrame(
+            NSView::alloc(self.mtm()),
+            NSRect::new(
+                NSPoint::new(SEARCH_PANEL_PADDING, SEARCH_PANEL_HEIGHT - 96.0),
+                NSSize::new(SEARCH_PANEL_WIDTH - SEARCH_PANEL_PADDING * 2.0, 44.0),
+            ),
+        );
+        search_box.setWantsLayer(true);
+        if let Some(layer) = search_box.layer() {
+            layer.setCornerRadius(12.0);
+            layer.setMasksToBounds(true);
+            layer.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
+        }
+
+        let icon = NSTextField::labelWithString(&NSString::from_str("🔍"), self.mtm());
+        icon.setFrame(NSRect::new(
+            NSPoint::new(14.0, 11.0),
+            NSSize::new(22.0, 22.0),
+        ));
+        search_box.addSubview(&icon);
+
+        let field = NSTextField::initWithFrame(
+            NSTextField::alloc(self.mtm()),
+            NSRect::new(
+                NSPoint::new(42.0, 9.0),
+                NSSize::new(SEARCH_PANEL_WIDTH - SEARCH_PANEL_PADDING * 2.0 - 58.0, 26.0),
+            ),
+        );
+        field.setPlaceholderString(Some(&NSString::from_str(t(
+            self.settings().language,
+            "search_placeholder",
+        ))));
+        field.setBezeled(false);
+        field.setBordered(false);
+        field.setDrawsBackground(false);
+        field.setFocusRingType(NSFocusRingType::None);
+        field.setEditable(true);
+        field.setSelectable(true);
+        field.setFont(Some(&NSFont::systemFontOfSize(18.0)));
+        field.setTextColor(Some(&NSColor::labelColor()));
+        unsafe {
+            field.setDelegate(Some(ProtocolObject::from_ref(self)));
+        }
+        search_box.addSubview(&field);
+        root.addSubview(&search_box);
+
+        let scroll_frame = NSRect::new(
+            NSPoint::new(SEARCH_PANEL_PADDING, SEARCH_PANEL_PADDING),
+            NSSize::new(
+                SEARCH_PANEL_WIDTH - SEARCH_PANEL_PADDING * 2.0,
+                SEARCH_PANEL_HEIGHT - 124.0,
+            ),
+        );
+        let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(self.mtm()), scroll_frame);
+        scroll.setBorderType(NSBorderType::NoBorder);
+        scroll.setDrawsBackground(false);
+        scroll.setHasVerticalScroller(true);
+        scroll.setHasHorizontalScroller(false);
+        scroll.setAutohidesScrollers(true);
+
+        let results_view = NSView::initWithFrame(
+            NSView::alloc(self.mtm()),
+            NSRect::new(NSPoint::new(0.0, 0.0), scroll_frame.size),
+        );
+        scroll.setDocumentView(Some(&results_view));
+        root.addSubview(&scroll);
+
+        window.setContentView(Some(&root));
+        let _ = self.ivars().search_field.set(field);
+        let _ = self.ivars().search_results_view.set(results_view);
+        window
+    }
+
+    fn refresh_search_candidates(&self) {
+        let lang = self.settings().language;
+        let Some(store) = self.store() else {
+            return;
+        };
+        let query = self
+            .ivars()
+            .search_field
+            .get()
+            .map(|field| nsstring_to_string(&field.stringValue()))
+            .unwrap_or_default();
+        let entries = sorted_history(store.load_history().unwrap_or_default());
+        let ranked = ranked_history_matches(entries, &query);
+        *self.ivars().search_entries.borrow_mut() = ranked.clone();
+        if let Some(view) = self.ivars().search_results_view.get() {
+            self.render_search_results_view(view, &ranked, &query, lang);
+        }
+    }
+
+    fn render_search_results_view(
+        &self,
+        view: &NSView,
+        entries: &[HistoryEntry],
+        query: &str,
+        lang: Language,
+    ) {
+        view.setSubviews(&NSArray::new());
+        let width = SEARCH_PANEL_WIDTH - SEARCH_PANEL_PADDING * 2.0;
+        if query.trim().is_empty() {
+            self.add_search_empty_state(view, t(lang, "search_placeholder"), width);
+            return;
+        }
+        if entries.is_empty() {
+            self.add_search_empty_state(view, t(lang, "search_no_results"), width);
+            return;
+        }
+
+        let settings = self.settings();
+        let max_candidates = settings.max_history_items.min(SEARCH_MAX_CANDIDATES);
+        let rendered = entries.iter().take(max_candidates).collect::<Vec<_>>();
+        let height = (rendered.len() as f64 * SEARCH_ROW_HEIGHT).max(SEARCH_PANEL_HEIGHT - 124.0);
+        view.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(width, height),
+        ));
+
+        for (idx, entry) in rendered.iter().enumerate() {
+            let prefix = format!("{:>2}. ", idx + 1);
+            let preview_units = preview_units_for_prefix(width as usize, &prefix);
+            let (content, truncated) = preview_with_truncation(&entry.content, preview_units);
+            let title = format!("{prefix}{content}");
+            let y = height - (idx as f64 + 1.0) * SEARCH_ROW_HEIGHT;
+
+            let label = NSTextField::labelWithString(&NSString::from_str(&title), self.mtm());
+            label.setFrame(NSRect::new(
+                NSPoint::new(6.0, y + 11.0),
+                NSSize::new(width - 12.0, 20.0),
+            ));
+            label.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+            label.setTextColor(Some(&NSColor::labelColor()));
+            label.setUsesSingleLineMode(true);
+            label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            view.addSubview(&label);
+
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(
+                    &NSString::from_str(""),
+                    Some(as_any_object(self)),
+                    Some(sel!(searchPanelRowClicked:)),
+                    self.mtm(),
+                )
+            };
+            button.setFrame(NSRect::new(
+                NSPoint::new(0.0, y + 3.0),
+                NSSize::new(width, SEARCH_ROW_HEIGHT - 6.0),
+            ));
+            button.setButtonType(NSButtonType::MomentaryChange);
+            button.setBordered(false);
+            button.setTransparent(true);
+            button.setTag(entry.id as isize);
+            button.setToolTip(Some(&NSString::from_str(if truncated {
+                entry.content.as_str()
+            } else {
+                &title
+            })));
+            view.addSubview(&button);
+        }
+        if height > SEARCH_PANEL_HEIGHT - 124.0 {
+            view.scrollPoint(NSPoint::new(0.0, height - (SEARCH_PANEL_HEIGHT - 124.0)));
+        } else {
+            view.scrollPoint(NSPoint::new(0.0, 0.0));
+        }
+    }
+
+    fn add_search_empty_state(&self, view: &NSView, message: &str, width: f64) {
+        view.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(width, SEARCH_PANEL_HEIGHT - 124.0),
+        ));
+        let label = NSTextField::labelWithString(&NSString::from_str(message), self.mtm());
+        label.setFrame(NSRect::new(
+            NSPoint::new(0.0, SEARCH_PANEL_HEIGHT - 164.0),
+            NSSize::new(width, 26.0),
+        ));
+        label.setAlignment(NSTextAlignment::Center);
+        label.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        view.addSubview(&label);
+    }
+
+    /// 回车时激活当前候选列表中的第一项，等价于点击它。
+    fn activate_first_search_candidate(&self) {
+        let id = self.ivars().search_entries.borrow().first().map(|e| e.id);
+        if let Some(id) = id {
+            self.activate_search_entry(id);
+        }
+    }
+
+    /// 复制并粘贴指定历史条目，然后关闭搜索浮层并刷新菜单内容。
+    fn activate_search_entry(&self, id: u64) {
+        self.close_search_panel();
+        let app = NSApplication::sharedApplication(self.mtm());
+        unsafe {
+            let _: () = msg_send![&*app, deactivate];
+        }
+        if let Some(store) = self.store() {
+            match copy_history_entry(store, id, true) {
+                Ok(()) => self.clear_error(),
+                Err(err) => self.report_paste_error(err),
+            }
+        }
+        self.rebuild_menu();
     }
 
     /// 处理来自 `paste_frontmost` 等接口的错误：
@@ -1090,15 +1601,15 @@ struct PreferencesControls {
     rich_popup: Retained<NSPopUpButton>,
 }
 
-fn capture_text(store: &Store, text: String, max_items: usize) -> Result<CaptureStatus, String> {
+fn capture_text(store: &Store, text: String) -> Result<CaptureStatus, String> {
     let text = normalize_clipboard_text(text);
     if text.is_empty() || text.len() > CAPTURE_MAX_BYTES || sensitive::looks_sensitive(&text) {
         return Ok(CaptureStatus::Ignored);
     }
 
+    // 历史永不裁剪：设置中的上限只影响展示数量，存储保留全部条目。
     let mut entries = store.load_history()?;
     let inserted = storage::upsert_history(&mut entries, text);
-    storage::prune_history(&mut entries, max_items);
     store.save_history(&entries)?;
 
     if inserted {
@@ -1108,14 +1619,10 @@ fn capture_text(store: &Store, text: String, max_items: usize) -> Result<Capture
     }
 }
 
-fn capture_rich(
-    store: &Store,
-    entry: RichHistoryEntry,
-    max_items: usize,
-) -> Result<CaptureStatus, String> {
+fn capture_rich(store: &Store, entry: RichHistoryEntry) -> Result<CaptureStatus, String> {
+    // 历史永不裁剪：设置中的上限只影响展示数量，存储保留全部条目。
     let mut entries = store.load_rich_history()?;
     let inserted = storage::upsert_rich_history(&mut entries, entry);
-    storage::prune_rich_history(&mut entries, max_items);
     store.save_rich_history(&entries)?;
 
     if inserted {
@@ -1131,12 +1638,15 @@ fn copy_history_entry(store: &Store, id: u64, paste: bool) -> Result<(), String>
         .iter()
         .position(|entry| entry.id == id)
         .ok_or_else(|| format!("history item `{id}` was not found"))?;
-    clipboard::write_text(&entries[entry_index].content)?;
+    let content = entries[entry_index].content.clone();
+    clipboard::write_text(&content)?;
     if paste {
         clipboard::paste_frontmost()?;
     }
-    entries[entry_index].use_count += 1;
-    entries[entry_index].updated_at = storage::now_millis();
+    let mut entry = entries.remove(entry_index);
+    entry.use_count += 1;
+    entry.updated_at = storage::now_millis();
+    entries.insert(0, entry);
     store.save_history(&entries)?;
     Ok(())
 }
@@ -1191,6 +1701,100 @@ fn sorted_history(mut entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
     entries
 }
 
+fn ranked_history_matches(entries: Vec<HistoryEntry>, query: &str) -> Vec<HistoryEntry> {
+    let query = normalize_search_text(query);
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut scored = entries
+        .into_iter()
+        .filter_map(|entry| history_match_score(&query, &entry.content).map(|score| (entry, score)))
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left, left_score), (right, right_score)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| right.use_count.cmp(&left.use_count))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    scored.into_iter().map(|(entry, _score)| entry).collect()
+}
+
+fn history_match_score(query: &str, content: &str) -> Option<i64> {
+    let content = normalize_search_text(content);
+    if content.is_empty() {
+        return None;
+    }
+    if content == query {
+        return Some(1_000_000);
+    }
+    if content.starts_with(query) {
+        return Some(900_000 - content.len().saturating_sub(query.len()) as i64);
+    }
+    if let Some(index) = content.find(query) {
+        return Some(800_000 - index as i64 * 20);
+    }
+
+    let query_words = query.split_whitespace().collect::<Vec<_>>();
+    if !query_words.is_empty() && query_words.iter().all(|word| content.contains(word)) {
+        let first_index = query_words
+            .iter()
+            .filter_map(|word| content.find(word))
+            .min()
+            .unwrap_or(0);
+        return Some(700_000 + query_words.len() as i64 * 1_000 - first_index as i64 * 10);
+    }
+
+    fuzzy_subsequence_score(query, &content).map(|score| 500_000 + score)
+}
+
+fn fuzzy_subsequence_score(query: &str, content: &str) -> Option<i64> {
+    let mut last_match: Option<usize> = None;
+    let mut search_start = 0usize;
+    let mut score = 0i64;
+    for ch in query.chars() {
+        let rest = content.get(search_start..)?;
+        let found = rest.find(ch)?;
+        let absolute = search_start + found;
+        if let Some(prev) = last_match {
+            let gap = absolute.saturating_sub(prev + 1);
+            score -= gap as i64 * 8;
+            if gap == 0 {
+                score += 25;
+            }
+        } else {
+            score -= absolute as i64 * 12;
+        }
+        score += 100;
+        last_match = Some(absolute);
+        search_start = absolute + ch.len_utf8();
+    }
+    Some(score)
+}
+
+fn normalize_search_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut previous_space = false;
+    for ch in text.to_lowercase().chars() {
+        let mapped = if ch.is_control() || ch.is_whitespace() {
+            ' '
+        } else {
+            ch
+        };
+        if mapped == ' ' {
+            if previous_space {
+                continue;
+            }
+            previous_space = true;
+        } else {
+            previous_space = false;
+        }
+        out.push(mapped);
+    }
+    out.trim().to_string()
+}
+
 fn sorted_rich_history(mut entries: Vec<RichHistoryEntry>) -> Vec<RichHistoryEntry> {
     entries.sort_by(|left, right| {
         right
@@ -1202,28 +1806,25 @@ fn sorted_rich_history(mut entries: Vec<RichHistoryEntry>) -> Vec<RichHistoryEnt
     entries
 }
 
-fn adjusted_popup_location(
-    location: NSPoint,
-    menu_item_count: usize,
-    mtm: MainThreadMarker,
-) -> NSPoint {
-    let Some(visible_frame) = visible_frame_for_point(location, mtm) else {
-        return location;
-    };
-    let estimated_height = estimate_menu_height(menu_item_count);
-    adjusted_popup_location_for_frame(location, visible_frame, estimated_height)
-}
-
 fn build_preferences_controls(
     settings: AppSettings,
     lang: Language,
     mtm: MainThreadMarker,
 ) -> PreferencesControls {
-    // 自上而下布局：每行 40px，预留底部 16px 边距，行高 24px。
+    // 自上而下布局：加大左右留白，避免英文长标签被截断。
     const ROW_HEIGHT: f64 = 40.0;
-    const PANEL_WIDTH: f64 = 360.0;
+    const PANEL_WIDTH: f64 = PREFERENCES_PANEL_WIDTH - 64.0;
     const TOTAL_ROWS: f64 = 7.0; // 语言、文本上限、文本展示、图片上限、图片展示、菜单宽度、富文本开关
     const PANEL_HEIGHT: f64 = TOTAL_ROWS * ROW_HEIGHT + 16.0;
+    const LABEL_X: f64 = 24.0;
+    const LABEL_WIDTH: f64 = 270.0;
+    const CONTROL_X: f64 = 330.0;
+    const CONTROL_WIDTH: f64 = 260.0;
+    const NUMBER_FIELD_WIDTH: f64 = 148.0;
+    const NUMBER_FIELD_HEIGHT: f64 = 20.0;
+    const NUMBER_FIELD_Y_OFFSET: f64 = 2.0;
+    const NUMBER_BACKGROUND_HEIGHT: f64 = 32.0;
+    const NUMBER_BACKGROUND_Y_OFFSET: f64 = -4.0;
 
     let view = NSView::initWithFrame(
         NSView::alloc(mtm),
@@ -1232,20 +1833,26 @@ fn build_preferences_controls(
             NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
         ),
     );
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setCornerRadius(14.0);
+        layer.setMasksToBounds(true);
+        layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.10).CGColor()));
+    }
 
     let row_y = |row: usize| PANEL_HEIGHT - 24.0 - row as f64 * ROW_HEIGHT;
 
     let language_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "language")), mtm);
     language_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, row_y(0)),
-        NSSize::new(140.0, 24.0),
+        NSPoint::new(LABEL_X, row_y(0)),
+        NSSize::new(LABEL_WIDTH, 24.0),
     ));
     let language_popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
         NSRect::new(
-            NSPoint::new(150.0, row_y(0) - 4.0),
-            NSSize::new(180.0, 28.0),
+            NSPoint::new(CONTROL_X, row_y(0) - 4.0),
+            NSSize::new(CONTROL_WIDTH, 28.0),
         ),
         false,
     );
@@ -1259,81 +1866,131 @@ fn build_preferences_controls(
     let history_limit_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "history_limit")), mtm);
     history_limit_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, row_y(1)),
-        NSSize::new(140.0, 24.0),
+        NSPoint::new(LABEL_X, row_y(1)),
+        NSSize::new(LABEL_WIDTH, 24.0),
     ));
     let history_limit_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, row_y(1)), NSSize::new(90.0, 24.0)),
+        NSRect::new(
+            NSPoint::new(CONTROL_X, row_y(1) + NUMBER_FIELD_Y_OFFSET),
+            NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
+        ),
     );
+    style_preferences_number_field(&history_limit_field);
     history_limit_field
         .setStringValue(&NSString::from_str(&settings.max_history_items.to_string()));
+    let history_limit_background = preferences_number_background(
+        NSPoint::new(CONTROL_X, row_y(1) + NUMBER_BACKGROUND_Y_OFFSET),
+        NUMBER_FIELD_WIDTH,
+        NUMBER_BACKGROUND_HEIGHT,
+        mtm,
+    );
 
     let visible_count_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "visible_count")), mtm);
     visible_count_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, row_y(2)),
-        NSSize::new(140.0, 24.0),
+        NSPoint::new(LABEL_X, row_y(2)),
+        NSSize::new(LABEL_WIDTH, 24.0),
     ));
     let visible_count_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, row_y(2)), NSSize::new(90.0, 24.0)),
+        NSRect::new(
+            NSPoint::new(CONTROL_X, row_y(2) + NUMBER_FIELD_Y_OFFSET),
+            NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
+        ),
     );
+    style_preferences_number_field(&visible_count_field);
     visible_count_field.setStringValue(&NSString::from_str(
         &settings.visible_history_items.to_string(),
     ));
+    let visible_count_background = preferences_number_background(
+        NSPoint::new(CONTROL_X, row_y(2) + NUMBER_BACKGROUND_Y_OFFSET),
+        NUMBER_FIELD_WIDTH,
+        NUMBER_BACKGROUND_HEIGHT,
+        mtm,
+    );
 
     let rich_history_limit_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_history_limit")), mtm);
     rich_history_limit_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, row_y(3)),
-        NSSize::new(140.0, 24.0),
+        NSPoint::new(LABEL_X, row_y(3)),
+        NSSize::new(LABEL_WIDTH, 24.0),
     ));
     let rich_history_limit_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, row_y(3)), NSSize::new(90.0, 24.0)),
+        NSRect::new(
+            NSPoint::new(CONTROL_X, row_y(3) + NUMBER_FIELD_Y_OFFSET),
+            NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
+        ),
     );
+    style_preferences_number_field(&rich_history_limit_field);
     rich_history_limit_field.setStringValue(&NSString::from_str(
         &settings.max_rich_history_items.to_string(),
     ));
+    let rich_history_limit_background = preferences_number_background(
+        NSPoint::new(CONTROL_X, row_y(3) + NUMBER_BACKGROUND_Y_OFFSET),
+        NUMBER_FIELD_WIDTH,
+        NUMBER_BACKGROUND_HEIGHT,
+        mtm,
+    );
 
     let rich_visible_count_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_visible_count")), mtm);
     rich_visible_count_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, row_y(4)),
-        NSSize::new(140.0, 24.0),
+        NSPoint::new(LABEL_X, row_y(4)),
+        NSSize::new(LABEL_WIDTH, 24.0),
     ));
     let rich_visible_count_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, row_y(4)), NSSize::new(90.0, 24.0)),
+        NSRect::new(
+            NSPoint::new(CONTROL_X, row_y(4) + NUMBER_FIELD_Y_OFFSET),
+            NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
+        ),
     );
+    style_preferences_number_field(&rich_visible_count_field);
     rich_visible_count_field.setStringValue(&NSString::from_str(
         &settings.visible_rich_history_items.to_string(),
     ));
+    let rich_visible_count_background = preferences_number_background(
+        NSPoint::new(CONTROL_X, row_y(4) + NUMBER_BACKGROUND_Y_OFFSET),
+        NUMBER_FIELD_WIDTH,
+        NUMBER_BACKGROUND_HEIGHT,
+        mtm,
+    );
 
     let menu_width_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "menu_width")), mtm);
     menu_width_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, row_y(5)),
-        NSSize::new(140.0, 24.0),
+        NSPoint::new(LABEL_X, row_y(5)),
+        NSSize::new(LABEL_WIDTH, 24.0),
     ));
     let menu_width_field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(150.0, row_y(5)), NSSize::new(90.0, 24.0)),
+        NSRect::new(
+            NSPoint::new(CONTROL_X, row_y(5) + NUMBER_FIELD_Y_OFFSET),
+            NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
+        ),
     );
+    style_preferences_number_field(&menu_width_field);
     menu_width_field.setStringValue(&NSString::from_str(&settings.menu_width.to_string()));
+    let menu_width_background = preferences_number_background(
+        NSPoint::new(CONTROL_X, row_y(5) + NUMBER_BACKGROUND_Y_OFFSET),
+        NUMBER_FIELD_WIDTH,
+        NUMBER_BACKGROUND_HEIGHT,
+        mtm,
+    );
 
     let rich_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_capture_setting")), mtm);
     rich_label.setFrame(NSRect::new(
-        NSPoint::new(0.0, row_y(6)),
-        NSSize::new(140.0, 24.0),
+        NSPoint::new(LABEL_X, row_y(6)),
+        NSSize::new(LABEL_WIDTH, 24.0),
     ));
     let rich_popup = NSPopUpButton::initWithFrame_pullsDown(
         NSPopUpButton::alloc(mtm),
         NSRect::new(
-            NSPoint::new(150.0, row_y(6) - 4.0),
-            NSSize::new(180.0, 28.0),
+            NSPoint::new(CONTROL_X, row_y(6) - 4.0),
+            NSSize::new(CONTROL_WIDTH, 28.0),
         ),
         false,
     );
@@ -1348,14 +2005,19 @@ fn build_preferences_controls(
     view.addSubview(&language_label);
     view.addSubview(&language_popup);
     view.addSubview(&history_limit_label);
+    view.addSubview(&history_limit_background);
     view.addSubview(&history_limit_field);
     view.addSubview(&visible_count_label);
+    view.addSubview(&visible_count_background);
     view.addSubview(&visible_count_field);
     view.addSubview(&rich_history_limit_label);
+    view.addSubview(&rich_history_limit_background);
     view.addSubview(&rich_history_limit_field);
     view.addSubview(&rich_visible_count_label);
+    view.addSubview(&rich_visible_count_background);
     view.addSubview(&rich_visible_count_field);
     view.addSubview(&menu_width_label);
+    view.addSubview(&menu_width_background);
     view.addSubview(&menu_width_field);
     view.addSubview(&rich_label);
     view.addSubview(&rich_popup);
@@ -1408,14 +2070,57 @@ fn read_preferences_controls(controls: &PreferencesControls) -> AppSettings {
     })
 }
 
-fn prune_store_history(store: &Store, settings: &AppSettings) -> Result<(), String> {
-    let mut history = store.load_history()?;
-    storage::prune_history(&mut history, settings.max_history_items);
-    store.save_history(&history)?;
+fn style_preferences_number_field(field: &NSTextField) {
+    field.setBezeled(false);
+    field.setBordered(false);
+    field.setDrawsBackground(false);
+    field.setFocusRingType(NSFocusRingType::None);
+    field.setAlignment(NSTextAlignment::Center);
+    field.setControlSize(NSControlSize::Regular);
+    field.setUsesSingleLineMode(true);
+    field.setLineBreakMode(NSLineBreakMode::ByClipping);
+    field.setFont(Some(&NSFont::systemFontOfSize(15.0)));
+}
 
-    let mut rich_history = store.load_rich_history()?;
-    storage::prune_rich_history(&mut rich_history, settings.max_rich_history_items);
-    store.save_rich_history(&rich_history)
+fn preferences_number_background(
+    origin: NSPoint,
+    width: f64,
+    height: f64,
+    mtm: MainThreadMarker,
+) -> Retained<NSView> {
+    let view = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(origin, NSSize::new(width, height)),
+    );
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setCornerRadius(6.0);
+        layer.setMasksToBounds(true);
+        layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.12).CGColor()));
+    }
+    view
+}
+
+fn preferences_button(
+    title: &str,
+    origin: NSPoint,
+    action: objc2::runtime::Sel,
+    target: &MenuDelegate,
+    mtm: MainThreadMarker,
+) -> Retained<NSButton> {
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str(title),
+            Some(as_any_object(target)),
+            Some(action),
+            mtm,
+        )
+    };
+    button.setFrame(NSRect::new(origin, NSSize::new(120.0, 32.0)));
+    button.setBezelStyle(NSBezelStyle::Push);
+    button.setButtonType(NSButtonType::MomentaryPushIn);
+    button.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, 0.25)));
+    button
 }
 
 fn parse_positive_usize(value: &str, fallback: usize) -> usize {
@@ -1456,6 +2161,19 @@ fn nsstring_to_string(value: &NSString) -> String {
     }
 }
 
+fn adjusted_popup_location(
+    location: NSPoint,
+    menu_item_count: usize,
+    mtm: MainThreadMarker,
+) -> NSPoint {
+    let Some(visible_frame) = visible_frame_for_point(location, mtm) else {
+        return location;
+    };
+    let estimated_height =
+        menu_item_count as f64 * MENU_ITEM_HEIGHT_ESTIMATE + MENU_VERTICAL_PADDING_ESTIMATE;
+    adjusted_popup_location_for_frame(location, visible_frame, estimated_height)
+}
+
 fn adjusted_popup_location_for_frame(
     mut location: NSPoint,
     visible_frame: NSRect,
@@ -1477,10 +2195,6 @@ fn adjusted_popup_location_for_frame(
     }
 
     location
-}
-
-fn estimate_menu_height(item_count: usize) -> f64 {
-    item_count as f64 * MENU_ITEM_HEIGHT_ESTIMATE + MENU_VERTICAL_PADDING_ESTIMATE
 }
 
 fn preview_image_data(entry: &RichHistoryEntry) -> Option<Vec<u8>> {
@@ -1538,6 +2252,23 @@ fn position_preview_window(window: &NSWindow, mtm: MainThreadMarker) {
     window.setFrameOrigin(origin);
 }
 
+fn position_search_window(window: &NSWindow, mtm: MainThreadMarker) {
+    let mouse = NSEvent::mouseLocation();
+    let frame = window.frame();
+    let size = frame.size;
+    let visible = visible_frame_for_point(mouse, mtm)
+        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()));
+    if let Some(visible) = visible {
+        let origin = NSPoint::new(
+            visible.min().x + (visible.size.width - size.width) / 2.0,
+            visible.min().y + (visible.size.height - size.height) * 0.62,
+        );
+        window.setFrameOrigin(origin);
+    } else {
+        window.center();
+    }
+}
+
 fn visible_frame_for_point(point: NSPoint, mtm: MainThreadMarker) -> Option<NSRect> {
     let screens = NSScreen::screens(mtm);
     for idx in 0..screens.count() {
@@ -1564,16 +2295,21 @@ fn t(language: Language, key: &str) -> &'static str {
             "refresh" => "Refresh Menu",
             "show_menu" => "Show Menu",
             "history" => "History",
+            "search_history" => "Search history",
+            "search_placeholder" => "Type to search…",
+            "search_no_results" => "No matches",
             "load_history_failed" => "Failed to load history",
             "storage_unavailable" => "Storage unavailable",
             "no_history" => "No history yet",
             "preferences" => "Preferences...",
             "preferences_title" => "Preferences",
-            "preferences_help" => "Update the menu layout and clipboard capture behavior.",
+            "preferences_help" => {
+                "Adjust how many items are shown in the menu, language, and clipboard capture. History is never deleted."
+            }
             "language" => "Language",
-            "history_limit" => "History limit",
+            "history_limit" => "Max text items shown",
             "visible_count" => "Visible recent items",
-            "rich_history_limit" => "Image/file limit",
+            "rich_history_limit" => "Max image/file items shown",
             "rich_visible_count" => "Visible image/file items",
             "menu_width" => "Menu width",
             "rich_capture_setting" => "Images and files",
@@ -1611,16 +2347,21 @@ fn t(language: Language, key: &str) -> &'static str {
             "refresh" => "刷新菜单",
             "show_menu" => "显示菜单",
             "history" => "文本历史",
+            "search_history" => "搜索历史",
+            "search_placeholder" => "输入关键词搜索…",
+            "search_no_results" => "无匹配结果",
             "load_history_failed" => "加载历史失败",
             "storage_unavailable" => "存储不可用",
             "no_history" => "暂无历史",
             "preferences" => "偏好设置...",
             "preferences_title" => "偏好设置",
-            "preferences_help" => "在这里调整历史显示数量、语言以及图片/文件剪贴板捕获。",
+            "preferences_help" => {
+                "在这里调整菜单中展示的条数、语言以及图片/文件剪贴板捕获。历史记录不会被删除。"
+            }
             "language" => "语言",
-            "history_limit" => "历史条数上限",
+            "history_limit" => "文本最多展示数",
             "visible_count" => "顶部直接显示",
-            "rich_history_limit" => "图片/文件上限",
+            "rich_history_limit" => "图片/文件最多展示数",
             "rich_visible_count" => "图片/文件直显数量",
             "menu_width" => "菜单宽度",
             "rich_capture_setting" => "图片/文件剪贴板",
