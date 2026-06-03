@@ -2,20 +2,23 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::c_void;
 use std::process::Command;
 use std::ptr::null_mut;
+use std::thread;
+use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBorderType, NSButton, NSButtonType,
-    NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate, NSEvent,
-    NSFloatingWindowLevel, NSFocusRingType, NSFont, NSImage, NSImageScaling, NSImageView,
-    NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSNormalWindowLevel, NSPopUpButton,
-    NSScreen, NSScrollView, NSStatusBar, NSStatusItem, NSTextAlignment, NSTextField,
-    NSTextFieldDelegate, NSTextView, NSVariableStatusItemLength, NSView,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationOptions,
+    NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBezelStyle,
+    NSBorderType, NSButton, NSButtonType, NSColor, NSControl, NSControlSize,
+    NSControlTextEditingDelegate, NSEvent, NSFloatingWindowLevel, NSFocusRingType, NSFont, NSImage,
+    NSImageScaling, NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSNormalWindowLevel, NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView, NSStatusBar,
+    NSStatusItem, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView,
+    NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
@@ -126,6 +129,7 @@ struct MenuDelegateIvars {
     search_field: OnceCell<Retained<NSTextField>>,
     search_results_view: OnceCell<Retained<NSView>>,
     search_entries: RefCell<Vec<HistoryEntry>>,
+    previous_frontmost_app: RefCell<Option<Retained<NSRunningApplication>>>,
 }
 
 define_class!(
@@ -1224,6 +1228,7 @@ impl MenuDelegate {
 
     fn open_search_panel(&self) {
         let (window, field, _) = self.ensure_search_panel();
+        *self.ivars().previous_frontmost_app.borrow_mut() = frontmost_app_before_search();
         field.setStringValue(&NSString::from_str(""));
         self.refresh_search_candidates();
         position_search_window(&window, self.mtm());
@@ -1504,17 +1509,18 @@ impl MenuDelegate {
 
     /// 复制并粘贴指定历史条目，然后关闭搜索浮层并刷新菜单内容。
     fn activate_search_entry(&self, id: u64) {
+        let target_app = self.ivars().previous_frontmost_app.borrow().clone();
         self.close_search_panel();
-        let app = NSApplication::sharedApplication(self.mtm());
-        unsafe {
-            let _: () = msg_send![&*app, deactivate];
-        }
         if let Some(store) = self.store() {
-            match copy_history_entry(store, id, true) {
-                Ok(()) => self.clear_error(),
+            match copy_history_entry(store, id, false) {
+                Ok(()) => match paste_to_previous_frontmost(target_app.as_deref(), self.mtm()) {
+                    Ok(()) => self.clear_error(),
+                    Err(err) => self.report_paste_error(err),
+                },
                 Err(err) => self.report_paste_error(err),
             }
         }
+        *self.ivars().previous_frontmost_app.borrow_mut() = None;
         self.rebuild_menu();
     }
 
@@ -1581,6 +1587,34 @@ unsafe extern "C" fn hotkey_handler(
 
 unsafe fn as_any_object<T>(value: &T) -> &AnyObject {
     unsafe { &*(value as *const T as *const AnyObject) }
+}
+
+fn frontmost_app_before_search() -> Option<Retained<NSRunningApplication>> {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let frontmost = workspace.frontmostApplication()?;
+    let current = NSRunningApplication::currentApplication();
+    if frontmost.processIdentifier() == current.processIdentifier() {
+        None
+    } else {
+        Some(frontmost)
+    }
+}
+
+fn paste_to_previous_frontmost(
+    target_app: Option<&NSRunningApplication>,
+    mtm: MainThreadMarker,
+) -> Result<(), String> {
+    if let Some(app) = target_app {
+        app.unhide();
+        app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+    } else {
+        let current = NSApplication::sharedApplication(mtm);
+        unsafe {
+            let _: () = msg_send![&*current, deactivate];
+        }
+    }
+    thread::sleep(Duration::from_millis(180));
+    clipboard::paste_frontmost()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
