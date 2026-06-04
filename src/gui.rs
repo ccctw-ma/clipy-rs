@@ -32,7 +32,7 @@ use crate::storage::{self, AppSettings, HistoryEntry, Language, RichHistoryEntry
 const CAPTURE_MAX_BYTES: usize = 256 * 1024;
 const CAPTURE_MAX_RICH_BYTES: usize = 10 * 1024 * 1024;
 const ELLIPSIS: &str = "...";
-const MENU_TITLE_HORIZONTAL_PADDING: f64 = 92.0;
+const MENU_TITLE_HORIZONTAL_PADDING: f64 = 44.0;
 const MIN_PREVIEW_WIDTH: f64 = 36.0;
 const MENU_SCREEN_MARGIN: f64 = 8.0;
 const SEARCH_PANEL_WIDTH: f64 = 660.0;
