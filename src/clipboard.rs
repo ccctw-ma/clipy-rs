@@ -304,6 +304,22 @@ unsafe extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    static kAXTrustedCheckOptionPrompt: *const c_void;
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    static kCFBooleanTrue: *const c_void;
+    fn CFDictionaryCreate(
+        allocator: *const c_void,
+        keys: *const *const c_void,
+        values: *const *const c_void,
+        num_values: isize,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> *const c_void;
 }
 
 /// 是否已获得 macOS 辅助功能（Accessibility）权限。
@@ -316,6 +332,41 @@ pub fn is_accessibility_trusted() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 pub fn is_accessibility_trusted() -> bool {
+    true
+}
+
+/// 触发 macOS 辅助功能权限刷新/授权提示，并返回当前进程是否已被信任。
+///
+/// 这比单纯 `AXIsProcessTrusted` 更适合处理 TCC 里旧路径/旧构建记录失效的情况。
+#[cfg(target_os = "macos")]
+pub fn request_accessibility_trust() -> bool {
+    if is_accessibility_trusted() {
+        return true;
+    }
+
+    unsafe {
+        let keys = [kAXTrustedCheckOptionPrompt];
+        let values = [kCFBooleanTrue];
+        let options = CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            keys.len() as isize,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        if options.is_null() {
+            return false;
+        }
+
+        let trusted = AXIsProcessTrustedWithOptions(options);
+        CFRelease(options);
+        trusted
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_accessibility_trust() -> bool {
     true
 }
 

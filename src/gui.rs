@@ -1,6 +1,5 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::c_void;
-use std::process::Command;
 use std::ptr::null_mut;
 use std::thread;
 use std::time::Duration;
@@ -9,20 +8,21 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationOptions,
-    NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBezelStyle,
-    NSBorderType, NSButton, NSButtonType, NSColor, NSControl, NSControlSize,
-    NSControlTextEditingDelegate, NSEvent, NSFloatingWindowLevel, NSFocusRingType, NSFont, NSImage,
-    NSImageScaling, NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSNormalWindowLevel, NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView, NSStatusBar,
-    NSStatusItem, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView,
-    NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBorderType, NSButton, NSButtonType,
+    NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate, NSEvent,
+    NSFloatingWindowLevel, NSFocusRingType, NSFont, NSFontAttributeName, NSImage, NSImageScaling,
+    NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSNormalWindowLevel,
+    NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView, NSStatusBar, NSStatusItem,
+    NSStringDrawing, NSText, NSTextAlignment, NSTextField, NSTextFieldCell, NSTextFieldDelegate,
+    NSTextView, NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
+    NSWindowAnimationBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
     NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, NSTimer,
+    MainThreadMarker, NSArray, NSAttributedStringKey, NSData, NSDictionary, NSNotification,
+    NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
 
 use crate::clipboard;
@@ -31,11 +31,9 @@ use crate::storage::{self, AppSettings, HistoryEntry, Language, RichHistoryEntry
 
 const CAPTURE_MAX_BYTES: usize = 256 * 1024;
 const CAPTURE_MAX_RICH_BYTES: usize = 10 * 1024 * 1024;
-const MIN_PREVIEW_UNITS: usize = 6;
-const MENU_WIDTH_TEXT_PADDING: usize = 56;
-const MENU_WIDTH_UNIT_PIXELS: usize = 5;
 const ELLIPSIS: &str = "...";
-const ELLIPSIS_UNITS: usize = 3;
+const MENU_TITLE_HORIZONTAL_PADDING: f64 = 92.0;
+const MIN_PREVIEW_WIDTH: f64 = 36.0;
 const MENU_SCREEN_MARGIN: f64 = 8.0;
 const SEARCH_PANEL_WIDTH: f64 = 660.0;
 const SEARCH_PANEL_HEIGHT: f64 = 560.0;
@@ -43,8 +41,8 @@ const SEARCH_PANEL_PADDING: f64 = 18.0;
 const SEARCH_ROW_HEIGHT: f64 = 42.0;
 const SEARCH_MAX_CANDIDATES: usize = 20;
 const PREVIEW_PANEL_SIZE: f64 = 360.0;
-const PREFERENCES_PANEL_WIDTH: f64 = 700.0;
-const PREFERENCES_PANEL_HEIGHT: f64 = 560.0;
+const PREFERENCES_PANEL_WIDTH: f64 = 560.0;
+const PREFERENCES_PANEL_HEIGHT: f64 = 362.0;
 const MENU_ITEM_HEIGHT_ESTIMATE: f64 = 22.0;
 const MENU_VERTICAL_PADDING_ESTIMATE: f64 = 16.0;
 
@@ -359,6 +357,90 @@ define_class!(
     unsafe impl NSTextFieldDelegate for MenuDelegate {}
 );
 
+define_class!(
+    // 自定义文本输入框单元格：把文字在垂直方向上居中。
+    // NSTextFieldCell 默认把单行文字绘制在单元格顶部，因此无论怎样
+    // 调整外框的 frame / 高度，文字相对灰色背景框始终偏上。通过重写
+    // 绘制 / 编辑 / 选择区域，让文字始终落在单元格的垂直中线上。
+    #[unsafe(super = NSTextFieldCell)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ClipyCenteredTextFieldCell"]
+    struct CenteredTextFieldCell;
+
+    impl CenteredTextFieldCell {
+        #[unsafe(method(drawingRectForBounds:))]
+        fn drawing_rect_for_bounds(&self, rect: NSRect) -> NSRect {
+            let base: NSRect = unsafe { msg_send![super(self), drawingRectForBounds: rect] };
+            center_rect_vertically(self, base)
+        }
+
+        #[unsafe(method(titleRectForBounds:))]
+        fn title_rect_for_bounds(&self, rect: NSRect) -> NSRect {
+            let base: NSRect = unsafe { msg_send![super(self), titleRectForBounds: rect] };
+            center_rect_vertically(self, base)
+        }
+
+        #[unsafe(method(editWithFrame:inView:editor:delegate:event:))]
+        fn edit_with_frame(
+            &self,
+            rect: NSRect,
+            control_view: &NSView,
+            text_obj: &NSText,
+            delegate: Option<&AnyObject>,
+            event: Option<&NSEvent>,
+        ) {
+            let centered = center_rect_vertically(self, rect);
+            unsafe {
+                let _: () = msg_send![
+                    super(self),
+                    editWithFrame: centered,
+                    inView: control_view,
+                    editor: text_obj,
+                    delegate: delegate,
+                    event: event,
+                ];
+            }
+        }
+
+        #[unsafe(method(selectWithFrame:inView:editor:delegate:start:length:))]
+        fn select_with_frame(
+            &self,
+            rect: NSRect,
+            control_view: &NSView,
+            text_obj: &NSText,
+            delegate: Option<&AnyObject>,
+            sel_start: isize,
+            sel_length: isize,
+        ) {
+            let centered = center_rect_vertically(self, rect);
+            unsafe {
+                let _: () = msg_send![
+                    super(self),
+                    selectWithFrame: centered,
+                    inView: control_view,
+                    editor: text_obj,
+                    delegate: delegate,
+                    start: sel_start,
+                    length: sel_length,
+                ];
+            }
+        }
+    }
+);
+
+// 基于单元格内文字的真实高度，把给定矩形在垂直方向居中。
+fn center_rect_vertically(cell: &CenteredTextFieldCell, rect: NSRect) -> NSRect {
+    let text_height = cell.cellSize().height;
+    if text_height <= 0.0 || text_height >= rect.size.height {
+        return rect;
+    }
+    let inset = ((rect.size.height - text_height) / 2.0).floor();
+    NSRect::new(
+        NSPoint::new(rect.origin.x, rect.origin.y + inset),
+        NSSize::new(rect.size.width, text_height),
+    )
+}
+
 impl MenuDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(MenuDelegateIvars::default());
@@ -581,8 +663,8 @@ impl MenuDelegate {
                 Ok(entries) => self.add_history_items(menu, entries, lang),
                 Err(err) => {
                     let prefix = format!("{}: ", t(lang, "load_history_failed"));
-                    let preview_units = preview_units_for_prefix(settings.menu_width, &prefix);
-                    let (err_preview, truncated) = preview_with_truncation(&err, preview_units);
+                    let preview_width = preview_width_for_prefix(settings.menu_width, &prefix);
+                    let (err_preview, truncated) = preview_with_truncation(&err, preview_width);
                     let title = format!("{prefix}{err_preview}");
                     self.add_disabled_item_with_tooltip(
                         menu,
@@ -858,8 +940,8 @@ impl MenuDelegate {
                 .insert(entry.id as isize, data);
         }
         let prefix = format!("{kind}: ");
-        let preview_units = preview_units_for_prefix(menu_width, &prefix);
-        let (label, truncated) = preview_with_truncation(&entry.label, preview_units);
+        let preview_width = preview_width_for_prefix(menu_width, &prefix);
+        let (label, truncated) = preview_with_truncation(&entry.label, preview_width);
         let title = format!("{prefix}{label}");
         self.add_action_item_with_tooltip(
             menu,
@@ -972,12 +1054,12 @@ impl MenuDelegate {
         }
     }
 
-    fn configure_menu_appearance(&self, menu: &NSMenu) {
-        menu.setMinimumWidth(self.settings().menu_width as f64);
-    }
-
     fn add_disabled_item(&self, menu: &NSMenu, title: &str) {
         self.add_disabled_item_with_tooltip(menu, title, None);
+    }
+
+    fn configure_menu_appearance(&self, menu: &NSMenu) {
+        menu.setMinimumWidth(self.settings().menu_width as f64);
     }
 
     fn add_disabled_item_with_tooltip(&self, menu: &NSMenu, title: &str, tooltip: Option<&str>) {
@@ -1047,15 +1129,20 @@ impl MenuDelegate {
     }
 
     fn show_menu_at_mouse(&self) {
+        self.close_status_menu();
         let menu = NSMenu::initWithTitle(
             NSMenu::alloc(self.mtm()),
             &NSString::from_str(t(self.settings().language, "app_name")),
         );
         self.populate_menu(&menu);
+        menu.update();
+        let settings = self.settings();
+        let popup_width = menu.size().width.max(settings.menu_width as f64);
         let mouse_location = NSEvent::mouseLocation();
         let popup_location = adjusted_popup_location(
             mouse_location,
             menu.numberOfItems().max(0) as usize,
+            popup_width,
             self.mtm(),
         );
         // A false return can simply mean the user dismissed the menu by clicking outside.
@@ -1075,21 +1162,30 @@ impl MenuDelegate {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(self.mtm()),
                 rect,
-                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
         window.setTitle(&NSString::from_str(t(lang, "preferences_title")));
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        window.setTitlebarAppearsTransparent(true);
+        window.setMovableByWindowBackground(true);
         window.setLevel(NSNormalWindowLevel);
+        // 与搜索面板一致：禁用上屏动画，避免唤起时闪烁。
+        window.setAnimationBehavior(NSWindowAnimationBehavior::None);
         window.setHasShadow(true);
-        window.setOpaque(true);
-        window.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
 
-        let root = NSView::initWithFrame(NSView::alloc(self.mtm()), rect);
+        let root = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
+        root.setMaterial(NSVisualEffectMaterial::Menu);
+        root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        root.setState(NSVisualEffectState::Active);
         root.setWantsLayer(true);
         if let Some(layer) = root.layer() {
-            layer.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
+            layer.setCornerRadius(20.0);
+            layer.setMasksToBounds(true);
         }
 
         let title = NSTextField::labelWithString(
@@ -1097,45 +1193,31 @@ impl MenuDelegate {
             self.mtm(),
         );
         title.setFrame(NSRect::new(
-            NSPoint::new(32.0, PREFERENCES_PANEL_HEIGHT - 70.0),
-            NSSize::new(PREFERENCES_PANEL_WIDTH - 64.0, 30.0),
+            NSPoint::new(28.0, PREFERENCES_PANEL_HEIGHT - 54.0),
+            NSSize::new(PREFERENCES_PANEL_WIDTH - 56.0, 28.0),
         ));
-        title.setFont(Some(&NSFont::systemFontOfSize_weight(24.0, 0.35)));
+        title.setFont(Some(&NSFont::systemFontOfSize_weight(22.0, 0.35)));
         title.setTextColor(Some(&NSColor::labelColor()));
         title.setUsesSingleLineMode(true);
         title.setLineBreakMode(NSLineBreakMode::ByClipping);
         root.addSubview(&title);
 
-        let help = NSTextField::labelWithString(
-            &NSString::from_str(t(lang, "preferences_help")),
-            self.mtm(),
-        );
-        help.setFrame(NSRect::new(
-            NSPoint::new(32.0, PREFERENCES_PANEL_HEIGHT - 140.0),
-            NSSize::new(PREFERENCES_PANEL_WIDTH - 64.0, 54.0),
-        ));
-        help.setFont(Some(&NSFont::systemFontOfSize(15.0)));
-        help.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        help.setUsesSingleLineMode(false);
-        help.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-        root.addSubview(&help);
-
         controls.view.setFrame(NSRect::new(
-            NSPoint::new(32.0, 88.0),
-            NSSize::new(PREFERENCES_PANEL_WIDTH - 64.0, 310.0),
+            NSPoint::new(28.0, 68.0),
+            NSSize::new(PREFERENCES_PANEL_WIDTH - 56.0, 230.0),
         ));
         root.addSubview(&controls.view);
 
         let cancel = preferences_button(
             t(lang, "cancel"),
-            NSPoint::new(PREFERENCES_PANEL_WIDTH - 292.0, 30.0),
+            NSPoint::new(PREFERENCES_PANEL_WIDTH - 264.0, 28.0),
             sel!(cancelPreferences:),
             self,
             self.mtm(),
         );
         let save = preferences_button(
             t(lang, "save"),
-            NSPoint::new(PREFERENCES_PANEL_WIDTH - 152.0, 30.0),
+            NSPoint::new(PREFERENCES_PANEL_WIDTH - 140.0, 28.0),
             sel!(savePreferences:),
             self,
             self.mtm(),
@@ -1145,7 +1227,7 @@ impl MenuDelegate {
         root.addSubview(&save);
 
         window.setContentView(Some(&root));
-        window.center();
+        position_preferences_window(&window, self.mtm());
 
         let app = NSApplication::sharedApplication(self.mtm());
         app.activate();
@@ -1254,7 +1336,7 @@ impl MenuDelegate {
             NSPoint::new(0.0, 0.0),
             NSSize::new(SEARCH_PANEL_WIDTH, SEARCH_PANEL_HEIGHT),
         );
-        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView;
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(self.mtm()),
@@ -1268,16 +1350,25 @@ impl MenuDelegate {
             self.settings().language,
             "search_history",
         )));
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        window.setTitlebarAppearsTransparent(true);
+        window.setMovableByWindowBackground(true);
         window.setLevel(NSNormalWindowLevel);
+        // 禁用窗口的默认上屏动画，避免快捷键唤起时的淡入/缩放"闪一下"。
+        window.setAnimationBehavior(NSWindowAnimationBehavior::None);
         window.setHasShadow(true);
-        window.setOpaque(true);
-        window.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
         window.setDelegate(Some(ProtocolObject::from_ref(self)));
 
-        let root = NSView::initWithFrame(NSView::alloc(self.mtm()), rect);
+        let root = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
+        root.setMaterial(NSVisualEffectMaterial::Menu);
+        root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        root.setState(NSVisualEffectState::Active);
         root.setWantsLayer(true);
         if let Some(layer) = root.layer() {
-            layer.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
+            layer.setCornerRadius(20.0);
+            layer.setMasksToBounds(true);
         }
 
         let title = NSTextField::labelWithString(
@@ -1301,6 +1392,8 @@ impl MenuDelegate {
         );
         search_box.setWantsLayer(true);
         if let Some(layer) = search_box.layer() {
+            layer.setCornerRadius(8.0);
+            layer.setMasksToBounds(true);
             layer.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
         }
 
@@ -1346,7 +1439,7 @@ impl MenuDelegate {
         let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(self.mtm()), scroll_frame);
         scroll.setBorderType(NSBorderType::NoBorder);
         scroll.setDrawsBackground(false);
-        scroll.setHasVerticalScroller(true);
+        scroll.setHasVerticalScroller(false);
         scroll.setHasHorizontalScroller(false);
         scroll.setAutohidesScrollers(true);
 
@@ -1375,7 +1468,11 @@ impl MenuDelegate {
             .map(|field| nsstring_to_string(&field.stringValue()))
             .unwrap_or_default();
         let entries = sorted_history(store.load_history().unwrap_or_default());
-        let ranked = ranked_history_matches(entries, &query);
+        let ranked = if query.trim().is_empty() {
+            entries
+        } else {
+            ranked_history_matches(entries, &query)
+        };
         *self.ivars().search_entries.borrow_mut() = ranked.clone();
         if let Some(view) = self.ivars().search_results_view.get() {
             self.render_search_results_view(view, &ranked, &query, lang);
@@ -1391,12 +1488,13 @@ impl MenuDelegate {
     ) {
         view.setSubviews(&NSArray::new());
         let width = SEARCH_PANEL_WIDTH - SEARCH_PANEL_PADDING * 2.0;
-        if query.trim().is_empty() {
-            self.add_search_empty_state(view, t(lang, "search_placeholder"), width);
-            return;
-        }
         if entries.is_empty() {
-            self.add_search_empty_state(view, t(lang, "search_no_results"), width);
+            let message = if query.trim().is_empty() {
+                t(lang, "no_history")
+            } else {
+                t(lang, "search_no_results")
+            };
+            self.add_search_empty_state(view, message, width);
             return;
         }
 
@@ -1411,8 +1509,8 @@ impl MenuDelegate {
 
         for (idx, entry) in rendered.iter().enumerate() {
             let prefix = format!("{:>2}. ", idx + 1);
-            let preview_units = preview_units_for_prefix(width as usize, &prefix);
-            let (content, truncated) = preview_with_truncation(&entry.content, preview_units);
+            let preview_width = (width - 12.0 - menu_text_width(&prefix)).max(MIN_PREVIEW_WIDTH);
+            let (content, truncated) = preview_with_truncation(&entry.content, preview_width);
             let title = format!("{prefix}{content}");
             let y = height - (idx as f64 + 1.0) * SEARCH_ROW_HEIGHT;
 
@@ -1499,7 +1597,7 @@ impl MenuDelegate {
     }
 
     /// 处理来自 `paste_frontmost` 等接口的错误：
-    /// 若是辅助功能权限相关失败，弹原生 NSAlert 引导用户去系统设置；
+    /// 若是辅助功能权限相关失败，触发系统原生授权刷新；
     /// 否则照旧把错误写入菜单状态栏。
     fn report_paste_error(&self, err: String) {
         if err.contains("Accessibility permission") {
@@ -1511,28 +1609,9 @@ impl MenuDelegate {
     }
 
     fn show_accessibility_alert(&self) {
-        // 已经授权就直接清状态，不打扰用户。
-        if clipboard::is_accessibility_trusted() {
+        // 系统原生授权弹窗已经带“打开系统设置”，避免再叠一层自定义 NSAlert。
+        if clipboard::request_accessibility_trust() {
             self.clear_error();
-            return;
-        }
-        let lang = self.settings().language;
-        let alert = NSAlert::new(self.mtm());
-        alert.setAlertStyle(NSAlertStyle::Warning);
-        alert.setMessageText(&NSString::from_str(t(lang, "permission_required_title")));
-        alert.setInformativeText(&NSString::from_str(t(lang, "permission_required_body")));
-        alert.addButtonWithTitle(&NSString::from_str(t(lang, "open_settings")));
-        alert.addButtonWithTitle(&NSString::from_str(t(lang, "cancel")));
-
-        let app = NSApplication::sharedApplication(self.mtm());
-        app.activate();
-
-        if alert.runModal() == NSAlertFirstButtonReturn {
-            let _ = Command::new("open")
-                .arg(
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-                )
-                .status();
         }
     }
 }
@@ -1693,8 +1772,8 @@ fn normalize_clipboard_text(text: String) -> String {
 fn history_item_title(index: usize, entry: &HistoryEntry, menu_width: usize) -> (String, bool) {
     let pin = if entry.pinned { "* " } else { "" };
     let prefix = format!("{:>2}. {pin}", index + 1);
-    let preview_units = preview_units_for_prefix(menu_width, &prefix);
-    let (content, truncated) = preview_with_truncation(&entry.content, preview_units);
+    let preview_width = preview_width_for_prefix(menu_width, &prefix);
+    let (content, truncated) = preview_with_truncation(&entry.content, preview_width);
     (format!("{prefix}{content}"), truncated)
 }
 
@@ -1819,18 +1898,18 @@ fn build_preferences_controls(
     lang: Language,
     mtm: MainThreadMarker,
 ) -> PreferencesControls {
-    // 自上而下布局：加大左右留白，避免英文长标签被截断。
-    const ROW_HEIGHT: f64 = 40.0;
-    const PANEL_WIDTH: f64 = PREFERENCES_PANEL_WIDTH - 64.0;
+    // 菜单式紧凑布局：减少空白，同时保留足够的英文标签宽度。
+    const ROW_HEIGHT: f64 = 32.0;
+    const PANEL_WIDTH: f64 = PREFERENCES_PANEL_WIDTH - 56.0;
     const TOTAL_ROWS: f64 = 7.0; // 语言、文本上限、文本展示、图片上限、图片展示、菜单宽度、富文本开关
-    const PANEL_HEIGHT: f64 = TOTAL_ROWS * ROW_HEIGHT + 16.0;
-    const LABEL_X: f64 = 24.0;
-    const LABEL_WIDTH: f64 = 270.0;
-    const CONTROL_X: f64 = 330.0;
-    const CONTROL_WIDTH: f64 = 260.0;
-    const NUMBER_FIELD_WIDTH: f64 = 148.0;
+    const PANEL_HEIGHT: f64 = TOTAL_ROWS * ROW_HEIGHT + 6.0;
+    const LABEL_X: f64 = 16.0;
+    const LABEL_WIDTH: f64 = 220.0;
+    const CONTROL_X: f64 = 250.0;
+    const CONTROL_WIDTH: f64 = 220.0;
+    const NUMBER_FIELD_WIDTH: f64 = 132.0;
     const NUMBER_FIELD_HEIGHT: f64 = 24.0;
-    const NUMBER_FIELD_Y_OFFSET: f64 = 0.0;
+    const NUMBER_FIELD_Y_OFFSET: f64 = -2.0;
 
     let view = NSView::initWithFrame(
         NSView::alloc(mtm),
@@ -1875,7 +1954,7 @@ fn build_preferences_controls(
             NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
         ),
     );
-    style_preferences_number_field(&history_limit_field);
+    style_preferences_number_field(&history_limit_field, mtm);
     history_limit_field
         .setStringValue(&NSString::from_str(&settings.max_history_items.to_string()));
     let visible_count_label =
@@ -1891,7 +1970,7 @@ fn build_preferences_controls(
             NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
         ),
     );
-    style_preferences_number_field(&visible_count_field);
+    style_preferences_number_field(&visible_count_field, mtm);
     visible_count_field.setStringValue(&NSString::from_str(
         &settings.visible_history_items.to_string(),
     ));
@@ -1908,7 +1987,7 @@ fn build_preferences_controls(
             NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
         ),
     );
-    style_preferences_number_field(&rich_history_limit_field);
+    style_preferences_number_field(&rich_history_limit_field, mtm);
     rich_history_limit_field.setStringValue(&NSString::from_str(
         &settings.max_rich_history_items.to_string(),
     ));
@@ -1925,7 +2004,7 @@ fn build_preferences_controls(
             NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
         ),
     );
-    style_preferences_number_field(&rich_visible_count_field);
+    style_preferences_number_field(&rich_visible_count_field, mtm);
     rich_visible_count_field.setStringValue(&NSString::from_str(
         &settings.visible_rich_history_items.to_string(),
     ));
@@ -1942,7 +2021,7 @@ fn build_preferences_controls(
             NSSize::new(NUMBER_FIELD_WIDTH, NUMBER_FIELD_HEIGHT),
         ),
     );
-    style_preferences_number_field(&menu_width_field);
+    style_preferences_number_field(&menu_width_field, mtm);
     menu_width_field.setStringValue(&NSString::from_str(&settings.menu_width.to_string()));
     let rich_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_capture_setting")), mtm);
@@ -2029,16 +2108,34 @@ fn read_preferences_controls(controls: &PreferencesControls) -> AppSettings {
     })
 }
 
-fn style_preferences_number_field(field: &NSTextField) {
-    field.setBezeled(true);
-    field.setBordered(true);
+fn style_preferences_number_field(field: &NSTextField, mtm: MainThreadMarker) {
+    // 用自定义的居中单元格替换默认单元格，确保数字在灰色圆角框内垂直居中。
+    let cell: Retained<CenteredTextFieldCell> = unsafe {
+        msg_send![
+            CenteredTextFieldCell::alloc(mtm),
+            initTextCell: &*NSString::from_str(""),
+        ]
+    };
+    field.setCell(Some(&cell));
+
+    field.setBezeled(false);
+    field.setBordered(false);
     field.setDrawsBackground(true);
-    field.setBackgroundColor(Some(&NSColor::textBackgroundColor()));
+    field.setBackgroundColor(Some(&NSColor::controlBackgroundColor()));
+    field.setFocusRingType(NSFocusRingType::None);
+    field.setEditable(true);
+    field.setSelectable(true);
     field.setAlignment(NSTextAlignment::Center);
-    field.setControlSize(NSControlSize::Regular);
+    field.setControlSize(NSControlSize::Small);
     field.setUsesSingleLineMode(true);
     field.setLineBreakMode(NSLineBreakMode::ByClipping);
-    field.setFont(Some(&NSFont::systemFontOfSize(15.0)));
+    field.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+    field.setWantsLayer(true);
+    if let Some(layer) = field.layer() {
+        layer.setCornerRadius(6.0);
+        layer.setMasksToBounds(true);
+        layer.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
+    }
 }
 
 fn preferences_button(
@@ -2056,7 +2153,7 @@ fn preferences_button(
             mtm,
         )
     };
-    button.setFrame(NSRect::new(origin, NSSize::new(120.0, 32.0)));
+    button.setFrame(NSRect::new(origin, NSSize::new(104.0, 30.0)));
     button.setBezelStyle(NSBezelStyle::Push);
     button.setButtonType(NSButtonType::MomentaryPushIn);
     button.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, 0.25)));
@@ -2076,18 +2173,22 @@ fn set_menu_item_tooltip(item: &NSMenuItem, tooltip: &str) {
     item.setToolTip(Some(&NSString::from_str(tooltip)));
 }
 
-fn title_units_for_width(menu_width: usize) -> usize {
-    menu_width
-        .saturating_sub(MENU_WIDTH_TEXT_PADDING)
-        .checked_div(MENU_WIDTH_UNIT_PIXELS)
-        .unwrap_or(0)
-        .max(MIN_PREVIEW_UNITS)
+fn title_width_for_menu(menu_width: usize) -> f64 {
+    (menu_width as f64 - MENU_TITLE_HORIZONTAL_PADDING).max(MIN_PREVIEW_WIDTH)
 }
 
-fn preview_units_for_prefix(menu_width: usize, prefix: &str) -> usize {
-    title_units_for_width(menu_width)
-        .saturating_sub(display_units_for_text(prefix))
-        .max(MIN_PREVIEW_UNITS)
+fn preview_width_for_prefix(menu_width: usize, prefix: &str) -> f64 {
+    (title_width_for_menu(menu_width) - menu_text_width(prefix)).max(MIN_PREVIEW_WIDTH)
+}
+
+fn menu_text_width(text: &str) -> f64 {
+    let font = NSFont::menuFontOfSize(0.0);
+    let font_object = unsafe { as_any_object(&*font) };
+    let font_key = unsafe { NSFontAttributeName };
+    let attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>> =
+        NSDictionary::from_slices(&[font_key], &[font_object]);
+    let value = NSString::from_str(text);
+    unsafe { value.sizeWithAttributes(Some(&attrs)).width.ceil() }
 }
 
 fn nsstring_to_string(value: &NSString) -> String {
@@ -2104,6 +2205,7 @@ fn nsstring_to_string(value: &NSString) -> String {
 fn adjusted_popup_location(
     location: NSPoint,
     menu_item_count: usize,
+    menu_width: f64,
     mtm: MainThreadMarker,
 ) -> NSPoint {
     let Some(visible_frame) = visible_frame_for_point(location, mtm) else {
@@ -2111,16 +2213,19 @@ fn adjusted_popup_location(
     };
     let estimated_height =
         menu_item_count as f64 * MENU_ITEM_HEIGHT_ESTIMATE + MENU_VERTICAL_PADDING_ESTIMATE;
-    adjusted_popup_location_for_frame(location, visible_frame, estimated_height)
+    adjusted_popup_location_for_frame(location, visible_frame, estimated_height, menu_width)
 }
 
 fn adjusted_popup_location_for_frame(
     mut location: NSPoint,
     visible_frame: NSRect,
     menu_height: f64,
+    menu_width: f64,
 ) -> NSPoint {
     let bottom = visible_frame.min().y + MENU_SCREEN_MARGIN;
     let top = visible_frame.max().y - MENU_SCREEN_MARGIN;
+    let left = visible_frame.min().x + MENU_SCREEN_MARGIN;
+    let right = visible_frame.max().x - MENU_SCREEN_MARGIN;
     let available_below = location.y - bottom;
 
     if available_below < menu_height {
@@ -2132,6 +2237,12 @@ fn adjusted_popup_location_for_frame(
     }
     if location.y < bottom {
         location.y = bottom;
+    }
+    if location.x + menu_width > right {
+        location.x = right - menu_width;
+    }
+    if location.x < left {
+        location.x = left;
     }
 
     location
@@ -2203,10 +2314,52 @@ fn position_search_window(window: &NSWindow, mtm: MainThreadMarker) {
             visible.min().x + (visible.size.width - size.width) / 2.0,
             visible.min().y + (visible.size.height - size.height) * 0.62,
         );
-        window.setFrameOrigin(origin);
+        window.setFrameOrigin(clamp_origin_to_visible(origin, size, visible));
     } else {
         window.center();
     }
+}
+
+/// 将偏好设置面板定位到鼠标所在的显示器，并居中显示；同时夹取边界，
+/// 确保整个面板都落在该显示器的可见区域内、不会被屏幕边缘裁切。
+fn position_preferences_window(window: &NSWindow, mtm: MainThreadMarker) {
+    let mouse = NSEvent::mouseLocation();
+    let frame = window.frame();
+    let size = frame.size;
+    let visible = visible_frame_for_point(mouse, mtm)
+        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()));
+    if let Some(visible) = visible {
+        let origin = NSPoint::new(
+            visible.min().x + (visible.size.width - size.width) / 2.0,
+            visible.min().y + (visible.size.height - size.height) / 2.0,
+        );
+        window.setFrameOrigin(clamp_origin_to_visible(origin, size, visible));
+    } else {
+        window.center();
+    }
+}
+
+/// 在保证窗口完整可见的前提下，把给定原点夹取到可见区域内。
+/// 优先保证左/下边不被裁切（窗口比屏幕大时左下角对齐）。
+fn clamp_origin_to_visible(mut origin: NSPoint, size: NSSize, visible: NSRect) -> NSPoint {
+    let max_x = visible.max().x - size.width - MENU_SCREEN_MARGIN;
+    let max_y = visible.max().y - size.height - MENU_SCREEN_MARGIN;
+    let min_x = visible.min().x + MENU_SCREEN_MARGIN;
+    let min_y = visible.min().y + MENU_SCREEN_MARGIN;
+
+    if origin.x > max_x {
+        origin.x = max_x;
+    }
+    if origin.x < min_x {
+        origin.x = min_x;
+    }
+    if origin.y > max_y {
+        origin.y = max_y;
+    }
+    if origin.y < min_y {
+        origin.y = min_y;
+    }
+    origin
 }
 
 fn visible_frame_for_point(point: NSPoint, mtm: MainThreadMarker) -> Option<NSRect> {
@@ -2243,9 +2396,6 @@ fn t(language: Language, key: &str) -> &'static str {
             "no_history" => "No history yet",
             "preferences" => "Preferences...",
             "preferences_title" => "Preferences",
-            "preferences_help" => {
-                "Adjust how many items are shown in the menu, language, and clipboard capture. History is never deleted."
-            }
             "language" => "Language",
             "history_limit" => "Max text items shown",
             "visible_count" => "Visible recent items",
@@ -2294,9 +2444,6 @@ fn t(language: Language, key: &str) -> &'static str {
             "no_history" => "暂无历史",
             "preferences" => "偏好设置...",
             "preferences_title" => "偏好设置",
-            "preferences_help" => {
-                "在这里调整菜单中展示的条数、语言以及图片/文件剪贴板捕获。历史记录不会被删除。"
-            }
             "language" => "语言",
             "history_limit" => "文本最多展示数",
             "visible_count" => "顶部直接显示",
@@ -2332,10 +2479,31 @@ fn t(language: Language, key: &str) -> &'static str {
     }
 }
 
-fn preview_with_truncation(text: &str, max_units: usize) -> (String, bool) {
-    let max_units = max_units.max(ELLIPSIS_UNITS);
-    let mut out = String::with_capacity(max_units.min(text.len()));
-    let mut used_units = 0;
+fn preview_with_truncation(text: &str, max_width: f64) -> (String, bool) {
+    let max_width = max_width.max(menu_text_width(ELLIPSIS));
+    let normalized = normalize_menu_preview(text);
+    if menu_text_width(&normalized) <= max_width {
+        return (normalized, false);
+    }
+
+    let chars = normalized.chars().collect::<Vec<_>>();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let candidate = truncated_candidate(&chars, mid);
+        if menu_text_width(&candidate) <= max_width {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    (truncated_candidate(&chars, low), true)
+}
+
+fn normalize_menu_preview(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
     let mut previous_space = false;
     for ch in text.chars() {
         let mapped = if ch.is_control() || ch.is_whitespace() {
@@ -2351,47 +2519,18 @@ fn preview_with_truncation(text: &str, max_units: usize) -> (String, bool) {
         } else {
             previous_space = false;
         }
-        let mapped_units = display_units(mapped);
-        if used_units + mapped_units > max_units {
-            append_ellipsis_within_budget(&mut out, &mut used_units, max_units);
-            return (out, true);
-        }
         out.push(mapped);
-        used_units += mapped_units;
     }
-    (out, false)
+    out
 }
 
-fn append_ellipsis_within_budget(out: &mut String, used_units: &mut usize, max_units: usize) {
-    while *used_units + ELLIPSIS_UNITS > max_units {
-        let Some(ch) = out.pop() else {
-            break;
-        };
-        *used_units = (*used_units).saturating_sub(display_units(ch));
+fn truncated_candidate(chars: &[char], char_count: usize) -> String {
+    let mut candidate = chars.iter().take(char_count).collect::<String>();
+    while candidate.ends_with(' ') {
+        candidate.pop();
     }
-    out.push_str(ELLIPSIS);
-    *used_units += ELLIPSIS_UNITS;
-}
-
-fn display_units_for_text(text: &str) -> usize {
-    text.chars().map(display_units).sum()
-}
-
-fn display_units(ch: char) -> usize {
-    if is_wide_char(ch) { 2 } else { 1 }
-}
-
-fn is_wide_char(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x11FF
-            | 0x2E80..=0xA4CF
-            | 0xAC00..=0xD7AF
-            | 0xF900..=0xFAFF
-            | 0xFE10..=0xFE6F
-            | 0xFF00..=0xFFEF
-            | 0x1F300..=0x1FAFF
-    )
+    candidate.push_str(ELLIPSIS);
+    candidate
 }
 
 #[cfg(test)]
@@ -2407,7 +2546,7 @@ mod tests {
     fn popup_location_moves_up_near_bottom() {
         let visible = frame(0.0, 0.0, 1440.0, 900.0);
         let location = NSPoint::new(500.0, 20.0);
-        let adjusted = adjusted_popup_location_for_frame(location, visible, 220.0);
+        let adjusted = adjusted_popup_location_for_frame(location, visible, 220.0, 260.0);
 
         assert!(adjusted.y > location.y);
         assert!(adjusted.y - MENU_SCREEN_MARGIN >= 220.0);
@@ -2417,7 +2556,7 @@ mod tests {
     fn popup_location_keeps_middle_position() {
         let visible = frame(0.0, 0.0, 1440.0, 900.0);
         let location = NSPoint::new(500.0, 500.0);
-        let adjusted = adjusted_popup_location_for_frame(location, visible, 220.0);
+        let adjusted = adjusted_popup_location_for_frame(location, visible, 220.0, 260.0);
 
         assert_eq!(adjusted, location);
     }
@@ -2426,16 +2565,71 @@ mod tests {
     fn popup_location_clamps_to_visible_top() {
         let visible = frame(0.0, 0.0, 1440.0, 260.0);
         let location = NSPoint::new(500.0, 20.0);
-        let adjusted = adjusted_popup_location_for_frame(location, visible, 400.0);
+        let adjusted = adjusted_popup_location_for_frame(location, visible, 400.0, 260.0);
 
         assert_eq!(adjusted.y, visible.max().y - MENU_SCREEN_MARGIN);
     }
 
     #[test]
-    fn preview_chars_follow_menu_width() {
-        assert!(title_units_for_width(180) < title_units_for_width(360));
-        assert!(preview_units_for_prefix(180, "10. ") < preview_units_for_prefix(360, "10. "));
-        assert_eq!(title_units_for_width(0), MIN_PREVIEW_UNITS);
+    fn popup_location_clamps_to_visible_right_edge() {
+        let visible = frame(0.0, 0.0, 1440.0, 900.0);
+        let location = NSPoint::new(1400.0, 500.0);
+        let menu_width = 260.0;
+        let adjusted = adjusted_popup_location_for_frame(location, visible, 220.0, menu_width);
+
+        assert!(adjusted.x + menu_width <= visible.max().x - MENU_SCREEN_MARGIN);
+    }
+
+    #[test]
+    fn clamp_keeps_panel_fully_visible_when_overflowing_right_bottom() {
+        let visible = frame(0.0, 0.0, 1440.0, 900.0);
+        let size = NSSize::new(560.0, 362.0);
+        // 原点超出右下边界，应被夹回，保证整窗可见。
+        let origin = NSPoint::new(1400.0, 800.0);
+        let clamped = clamp_origin_to_visible(origin, size, visible);
+
+        assert!(clamped.x + size.width <= visible.max().x);
+        assert!(clamped.y + size.height <= visible.max().y);
+        assert_eq!(clamped.x, visible.max().x - size.width - MENU_SCREEN_MARGIN);
+        assert_eq!(
+            clamped.y,
+            visible.max().y - size.height - MENU_SCREEN_MARGIN
+        );
+    }
+
+    #[test]
+    fn clamp_respects_secondary_screen_origin() {
+        // 模拟位于主屏右侧的第二块显示器。
+        let visible = frame(1440.0, 0.0, 1920.0, 1080.0);
+        let size = NSSize::new(560.0, 362.0);
+        let origin = NSPoint::new(
+            visible.min().x + (visible.size.width - size.width) / 2.0,
+            visible.min().y + (visible.size.height - size.height) / 2.0,
+        );
+        let clamped = clamp_origin_to_visible(origin, size, visible);
+
+        assert!(clamped.x >= visible.min().x + MENU_SCREEN_MARGIN);
+        assert!(clamped.x + size.width <= visible.max().x);
+        assert_eq!(clamped, origin);
+    }
+
+    #[test]
+    fn clamp_pins_to_min_corner_when_panel_larger_than_screen() {
+        let visible = frame(100.0, 50.0, 400.0, 300.0);
+        let size = NSSize::new(560.0, 362.0);
+        let origin = NSPoint::new(120.0, 70.0);
+        let clamped = clamp_origin_to_visible(origin, size, visible);
+
+        // 窗口比屏幕大时，优先对齐左下角（min 边界优先于 max）。
+        assert_eq!(clamped.x, visible.min().x + MENU_SCREEN_MARGIN);
+        assert_eq!(clamped.y, visible.min().y + MENU_SCREEN_MARGIN);
+    }
+
+    #[test]
+    fn preview_width_follows_menu_width() {
+        assert!(title_width_for_menu(180) < title_width_for_menu(360));
+        assert!(preview_width_for_prefix(180, "10. ") < preview_width_for_prefix(360, "10. "));
+        assert_eq!(title_width_for_menu(0), MIN_PREVIEW_WIDTH);
     }
 
     #[test]
@@ -2453,25 +2647,29 @@ mod tests {
         let (wide, wide_truncated) = history_item_title(0, &entry, 360);
 
         assert!(narrow.chars().count() < wide.chars().count());
+        assert!(menu_text_width(&narrow) <= title_width_for_menu(180) + 1.0);
+        assert!(menu_text_width(&wide) <= title_width_for_menu(360) + 1.0);
         assert!(narrow_truncated);
         assert!(!wide_truncated);
     }
 
     #[test]
     fn preview_truncation_keeps_ellipsis_within_budget() {
-        let (preview, truncated) = preview_with_truncation("abcdef", 5);
+        let budget = menu_text_width("abc") + menu_text_width(ELLIPSIS);
+        let (preview, truncated) = preview_with_truncation("abcdef", budget);
 
         assert!(truncated);
-        assert_eq!(display_units_for_text(&preview), 5);
+        assert!(menu_text_width(&preview) <= budget);
         assert!(preview.ends_with(ELLIPSIS));
     }
 
     #[test]
-    fn wide_characters_consume_more_budget() {
-        let (preview, truncated) = preview_with_truncation("苹果电脑abc", 7);
+    fn mixed_width_characters_are_measured_before_truncation() {
+        let budget = menu_text_width("苹果") + menu_text_width(ELLIPSIS);
+        let (preview, truncated) = preview_with_truncation("苹果电脑abc", budget);
 
         assert!(truncated);
-        assert!(display_units_for_text(&preview) <= 7);
+        assert!(menu_text_width(&preview) <= budget);
         assert!(preview.ends_with(ELLIPSIS));
     }
 }
