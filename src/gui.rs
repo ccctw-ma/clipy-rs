@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSStatusItem, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView,
     NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
     NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
-    NSWindowTitleVisibility, NSWorkspace,
+    NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
@@ -297,15 +297,6 @@ define_class!(
         #[unsafe(method(cancelPreferences:))]
         fn cancel_preferences(&self, _sender: &NSButton) {
             self.close_preferences_panel();
-        }
-
-        #[unsafe(method(openNotes:))]
-        fn open_notes(&self, _sender: &NSMenuItem) {
-            match Command::new("open").args(["-a", "Notes"]).status() {
-                Ok(status) if status.success() => self.clear_error(),
-                Ok(status) => self.set_error(format!("failed to open Notes: {status}")),
-                Err(err) => self.set_error(format!("failed to open Notes: {err}")),
-            }
         }
 
         #[unsafe(method(showClipyMenu:))]
@@ -608,7 +599,6 @@ impl MenuDelegate {
         self.add_action_item(menu, t(lang, "search_history"), sel!(openSearchPanel:), 0);
         self.add_favorites_menu(menu, lang);
         self.add_rich_history_menu(menu, lang);
-        self.add_action_item(menu, t(lang, "notes"), sel!(openNotes:), 0);
         menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
 
         self.add_action_item(menu, t(lang, "preferences"), sel!(openPreferences:), 0);
@@ -1085,28 +1075,21 @@ impl MenuDelegate {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(self.mtm()),
                 rect,
-                NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView,
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
         window.setTitle(&NSString::from_str(t(lang, "preferences_title")));
-        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-        window.setTitlebarAppearsTransparent(true);
-        window.setMovableByWindowBackground(true);
         window.setLevel(NSNormalWindowLevel);
         window.setHasShadow(true);
-        window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setOpaque(true);
+        window.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
 
-        let root = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
-        root.setMaterial(NSVisualEffectMaterial::HUDWindow);
-        root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-        root.setState(NSVisualEffectState::Active);
+        let root = NSView::initWithFrame(NSView::alloc(self.mtm()), rect);
         root.setWantsLayer(true);
         if let Some(layer) = root.layer() {
-            layer.setCornerRadius(22.0);
-            layer.setMasksToBounds(true);
+            layer.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
         }
 
         let title = NSTextField::labelWithString(
@@ -1271,7 +1254,7 @@ impl MenuDelegate {
             NSPoint::new(0.0, 0.0),
             NSSize::new(SEARCH_PANEL_WIDTH, SEARCH_PANEL_HEIGHT),
         );
-        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::FullSizeContentView;
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(self.mtm()),
@@ -1285,23 +1268,16 @@ impl MenuDelegate {
             self.settings().language,
             "search_history",
         )));
-        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-        window.setTitlebarAppearsTransparent(true);
-        window.setMovableByWindowBackground(true);
         window.setLevel(NSNormalWindowLevel);
         window.setHasShadow(true);
-        window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setOpaque(true);
+        window.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
         window.setDelegate(Some(ProtocolObject::from_ref(self)));
 
-        let root = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
-        root.setMaterial(NSVisualEffectMaterial::HUDWindow);
-        root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-        root.setState(NSVisualEffectState::Active);
+        let root = NSView::initWithFrame(NSView::alloc(self.mtm()), rect);
         root.setWantsLayer(true);
         if let Some(layer) = root.layer() {
-            layer.setCornerRadius(18.0);
-            layer.setMasksToBounds(true);
+            layer.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
         }
 
         let title = NSTextField::labelWithString(
@@ -1325,8 +1301,6 @@ impl MenuDelegate {
         );
         search_box.setWantsLayer(true);
         if let Some(layer) = search_box.layer() {
-            layer.setCornerRadius(12.0);
-            layer.setMasksToBounds(true);
             layer.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
         }
 
@@ -1855,10 +1829,8 @@ fn build_preferences_controls(
     const CONTROL_X: f64 = 330.0;
     const CONTROL_WIDTH: f64 = 260.0;
     const NUMBER_FIELD_WIDTH: f64 = 148.0;
-    const NUMBER_FIELD_HEIGHT: f64 = 20.0;
-    const NUMBER_FIELD_Y_OFFSET: f64 = 2.0;
-    const NUMBER_BACKGROUND_HEIGHT: f64 = 32.0;
-    const NUMBER_BACKGROUND_Y_OFFSET: f64 = -4.0;
+    const NUMBER_FIELD_HEIGHT: f64 = 24.0;
+    const NUMBER_FIELD_Y_OFFSET: f64 = 0.0;
 
     let view = NSView::initWithFrame(
         NSView::alloc(mtm),
@@ -1867,13 +1839,6 @@ fn build_preferences_controls(
             NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
         ),
     );
-    view.setWantsLayer(true);
-    if let Some(layer) = view.layer() {
-        layer.setCornerRadius(14.0);
-        layer.setMasksToBounds(true);
-        layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.10).CGColor()));
-    }
-
     let row_y = |row: usize| PANEL_HEIGHT - 24.0 - row as f64 * ROW_HEIGHT;
 
     let language_label =
@@ -1913,13 +1878,6 @@ fn build_preferences_controls(
     style_preferences_number_field(&history_limit_field);
     history_limit_field
         .setStringValue(&NSString::from_str(&settings.max_history_items.to_string()));
-    let history_limit_background = preferences_number_background(
-        NSPoint::new(CONTROL_X, row_y(1) + NUMBER_BACKGROUND_Y_OFFSET),
-        NUMBER_FIELD_WIDTH,
-        NUMBER_BACKGROUND_HEIGHT,
-        mtm,
-    );
-
     let visible_count_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "visible_count")), mtm);
     visible_count_label.setFrame(NSRect::new(
@@ -1937,13 +1895,6 @@ fn build_preferences_controls(
     visible_count_field.setStringValue(&NSString::from_str(
         &settings.visible_history_items.to_string(),
     ));
-    let visible_count_background = preferences_number_background(
-        NSPoint::new(CONTROL_X, row_y(2) + NUMBER_BACKGROUND_Y_OFFSET),
-        NUMBER_FIELD_WIDTH,
-        NUMBER_BACKGROUND_HEIGHT,
-        mtm,
-    );
-
     let rich_history_limit_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_history_limit")), mtm);
     rich_history_limit_label.setFrame(NSRect::new(
@@ -1961,13 +1912,6 @@ fn build_preferences_controls(
     rich_history_limit_field.setStringValue(&NSString::from_str(
         &settings.max_rich_history_items.to_string(),
     ));
-    let rich_history_limit_background = preferences_number_background(
-        NSPoint::new(CONTROL_X, row_y(3) + NUMBER_BACKGROUND_Y_OFFSET),
-        NUMBER_FIELD_WIDTH,
-        NUMBER_BACKGROUND_HEIGHT,
-        mtm,
-    );
-
     let rich_visible_count_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_visible_count")), mtm);
     rich_visible_count_label.setFrame(NSRect::new(
@@ -1985,13 +1929,6 @@ fn build_preferences_controls(
     rich_visible_count_field.setStringValue(&NSString::from_str(
         &settings.visible_rich_history_items.to_string(),
     ));
-    let rich_visible_count_background = preferences_number_background(
-        NSPoint::new(CONTROL_X, row_y(4) + NUMBER_BACKGROUND_Y_OFFSET),
-        NUMBER_FIELD_WIDTH,
-        NUMBER_BACKGROUND_HEIGHT,
-        mtm,
-    );
-
     let menu_width_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "menu_width")), mtm);
     menu_width_label.setFrame(NSRect::new(
@@ -2007,13 +1944,6 @@ fn build_preferences_controls(
     );
     style_preferences_number_field(&menu_width_field);
     menu_width_field.setStringValue(&NSString::from_str(&settings.menu_width.to_string()));
-    let menu_width_background = preferences_number_background(
-        NSPoint::new(CONTROL_X, row_y(5) + NUMBER_BACKGROUND_Y_OFFSET),
-        NUMBER_FIELD_WIDTH,
-        NUMBER_BACKGROUND_HEIGHT,
-        mtm,
-    );
-
     let rich_label =
         NSTextField::labelWithString(&NSString::from_str(t(lang, "rich_capture_setting")), mtm);
     rich_label.setFrame(NSRect::new(
@@ -2039,19 +1969,14 @@ fn build_preferences_controls(
     view.addSubview(&language_label);
     view.addSubview(&language_popup);
     view.addSubview(&history_limit_label);
-    view.addSubview(&history_limit_background);
     view.addSubview(&history_limit_field);
     view.addSubview(&visible_count_label);
-    view.addSubview(&visible_count_background);
     view.addSubview(&visible_count_field);
     view.addSubview(&rich_history_limit_label);
-    view.addSubview(&rich_history_limit_background);
     view.addSubview(&rich_history_limit_field);
     view.addSubview(&rich_visible_count_label);
-    view.addSubview(&rich_visible_count_background);
     view.addSubview(&rich_visible_count_field);
     view.addSubview(&menu_width_label);
-    view.addSubview(&menu_width_background);
     view.addSubview(&menu_width_field);
     view.addSubview(&rich_label);
     view.addSubview(&rich_popup);
@@ -2105,34 +2030,15 @@ fn read_preferences_controls(controls: &PreferencesControls) -> AppSettings {
 }
 
 fn style_preferences_number_field(field: &NSTextField) {
-    field.setBezeled(false);
-    field.setBordered(false);
-    field.setDrawsBackground(false);
-    field.setFocusRingType(NSFocusRingType::None);
+    field.setBezeled(true);
+    field.setBordered(true);
+    field.setDrawsBackground(true);
+    field.setBackgroundColor(Some(&NSColor::textBackgroundColor()));
     field.setAlignment(NSTextAlignment::Center);
     field.setControlSize(NSControlSize::Regular);
     field.setUsesSingleLineMode(true);
     field.setLineBreakMode(NSLineBreakMode::ByClipping);
     field.setFont(Some(&NSFont::systemFontOfSize(15.0)));
-}
-
-fn preferences_number_background(
-    origin: NSPoint,
-    width: f64,
-    height: f64,
-    mtm: MainThreadMarker,
-) -> Retained<NSView> {
-    let view = NSView::initWithFrame(
-        NSView::alloc(mtm),
-        NSRect::new(origin, NSSize::new(width, height)),
-    );
-    view.setWantsLayer(true);
-    if let Some(layer) = view.layer() {
-        layer.setCornerRadius(6.0);
-        layer.setMasksToBounds(true);
-        layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(1.0, 0.12).CGColor()));
-    }
-    view
 }
 
 fn preferences_button(
@@ -2360,7 +2266,6 @@ fn t(language: Language, key: &str) -> &'static str {
             "add_favorite" => "Add Favorite",
             "remove_favorite" => "Remove Favorite",
             "no_favorite_candidates" => "No history items to favorite",
-            "notes" => "Notes",
             "settings" => "Settings",
             "rich_enabled" => "[x] Capture images and files",
             "rich_disabled" => "[ ] Capture images and files",
@@ -2412,7 +2317,6 @@ fn t(language: Language, key: &str) -> &'static str {
             "add_favorite" => "添加收藏",
             "remove_favorite" => "取消收藏",
             "no_favorite_candidates" => "暂无可收藏历史",
-            "notes" => "备忘录",
             "settings" => "设置",
             "rich_enabled" => "[x] 捕获图片和文件",
             "rich_disabled" => "[ ] 捕获图片和文件",
