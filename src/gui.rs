@@ -15,9 +15,10 @@ use objc2_app_kit::{
     NSMenuDelegate, NSMenuItem, NSNormalWindowLevel, NSPopUpButton, NSPopUpMenuWindowLevel,
     NSRunningApplication, NSScreen, NSScrollView, NSStatusBar, NSStatusItem, NSStringDrawing,
     NSText, NSTextAlignment, NSTextField, NSTextFieldCell, NSTextFieldDelegate, NSTextView,
-    NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowAnimationBehavior, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
+    NSTrackingArea, NSTrackingAreaOptions, NSVariableStatusItemLength, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowAnimationBehavior, NSWindowDelegate, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedStringKey, NSData, NSDictionary, NSNotification,
@@ -40,7 +41,8 @@ const SEARCH_PANEL_PADDING: f64 = 18.0;
 const SEARCH_ROW_HEIGHT: f64 = 42.0;
 const SEARCH_MAX_CANDIDATES: usize = 20;
 const PREVIEW_PANEL_SIZE: f64 = 360.0;
-const PREVIEW_MENU_GAP: f64 = 14.0;
+const PREVIEW_MENU_GAP: f64 = 8.0;
+const RICH_MENU_ROW_HEIGHT: f64 = 24.0;
 const PREFERENCES_PANEL_WIDTH: f64 = 560.0;
 const PREFERENCES_PANEL_HEIGHT: f64 = 362.0;
 const MENU_ITEM_HEIGHT_ESTIMATE: f64 = 22.0;
@@ -122,6 +124,7 @@ struct MenuDelegateIvars {
     preview_image_view: OnceCell<Retained<NSImageView>>,
     image_previews: RefCell<std::collections::HashMap<isize, Vec<u8>>>,
     active_popup_frame: Cell<Option<NSRect>>,
+    rich_history_menu: RefCell<Option<Retained<NSMenu>>>,
     preferences_window: RefCell<Option<Retained<NSWindow>>>,
     preferences_controls: RefCell<Option<PreferencesControls>>,
     search_window: OnceCell<Retained<NSWindow>>,
@@ -154,6 +157,7 @@ define_class!(
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, _menu: &NSMenu) {
             self.hide_image_preview();
+            *self.ivars().rich_history_menu.borrow_mut() = None;
         }
     }
 
@@ -212,19 +216,13 @@ define_class!(
 
         #[unsafe(method(copyRichHistoryItem:))]
         fn copy_rich_history_item(&self, sender: &NSMenuItem) {
-            let id = sender.tag();
-            if id <= 0 {
-                self.set_error("invalid rich history item id".to_string());
-                return;
-            }
+            self.copy_rich_history_id(sender.tag());
+        }
 
-            if let Some(store) = self.store() {
-                match copy_rich_history_entry(store, id as u64, true) {
-                    Ok(()) => self.clear_error(),
-                    Err(err) => self.report_paste_error(err),
-                }
-            }
-            self.rebuild_menu();
+        #[unsafe(method(copyRichHistoryRow:))]
+        fn copy_rich_history_row(&self, sender: &NSButton) {
+            self.close_rich_history_menu();
+            self.copy_rich_history_id(sender.tag());
         }
 
         #[unsafe(method(clearHistory:))]
@@ -429,6 +427,38 @@ define_class!(
     }
 );
 
+#[derive(Default)]
+struct RichHistoryRowButtonIvars {
+    delegate: Cell<*const MenuDelegate>,
+    preview_tag: Cell<isize>,
+}
+
+define_class!(
+    #[unsafe(super = NSButton)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = RichHistoryRowButtonIvars]
+    #[name = "ClipyRichHistoryRowButton"]
+    struct RichHistoryRowButton;
+
+    impl RichHistoryRowButton {
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            let delegate = self.ivars().delegate.get();
+            if !delegate.is_null() {
+                unsafe { &*delegate }.update_image_preview(self.ivars().preview_tag.get());
+            }
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            let delegate = self.ivars().delegate.get();
+            if !delegate.is_null() {
+                unsafe { &*delegate }.hide_image_preview();
+            }
+        }
+    }
+);
+
 // 基于单元格内文字的真实高度，把给定矩形在垂直方向居中。
 fn center_rect_vertically(cell: &CenteredTextFieldCell, rect: NSRect) -> NSRect {
     let text_height = cell.cellSize().height;
@@ -442,10 +472,61 @@ fn center_rect_vertically(cell: &CenteredTextFieldCell, rect: NSRect) -> NSRect 
     )
 }
 
+fn new_rich_history_row_button(
+    frame: NSRect,
+    preview_tag: isize,
+    delegate: &MenuDelegate,
+    mtm: MainThreadMarker,
+) -> Retained<RichHistoryRowButton> {
+    let button = RichHistoryRowButton::alloc(mtm).set_ivars(RichHistoryRowButtonIvars {
+        delegate: Cell::new(delegate as *const MenuDelegate),
+        preview_tag: Cell::new(preview_tag),
+    });
+    let button: Retained<RichHistoryRowButton> =
+        unsafe { msg_send![super(button), initWithFrame: frame] };
+    let options = NSTrackingAreaOptions::MouseEnteredAndExited
+        | NSTrackingAreaOptions::ActiveAlways
+        | NSTrackingAreaOptions::InVisibleRect;
+    let tracking_area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            button.bounds(),
+            options,
+            Some(as_any_object(&*button)),
+            None,
+        )
+    };
+    button.addTrackingArea(&tracking_area);
+    button
+}
+
 impl MenuDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(MenuDelegateIvars::default());
         unsafe { msg_send![super(this), init] }
+    }
+
+    fn copy_rich_history_id(&self, id: isize) {
+        if id <= 0 {
+            self.set_error("invalid rich history item id".to_string());
+            return;
+        }
+
+        if let Some(store) = self.store() {
+            match copy_rich_history_entry(store, id as u64, true) {
+                Ok(()) => self.clear_error(),
+                Err(err) => self.report_paste_error(err),
+            }
+        }
+        self.rebuild_menu();
+    }
+
+    fn close_rich_history_menu(&self) {
+        let menu = self.ivars().rich_history_menu.borrow().clone();
+        if let Some(menu) = menu {
+            menu.cancelTrackingWithoutAnimation();
+        }
+        self.hide_image_preview();
     }
 
     fn finish_launching(&self) {
@@ -880,54 +961,122 @@ impl MenuDelegate {
             if limited.is_empty() {
                 self.add_disabled_item(&submenu, t(lang, "no_rich_history"));
             } else {
-                let direct_count = settings
-                    .visible_rich_history_items
-                    .min(settings.max_rich_history_items)
-                    .min(limited.len());
-
-                for entry in limited.iter().take(direct_count) {
-                    self.add_rich_entry_item(&submenu, entry, lang, settings.menu_width);
-                }
-
-                if direct_count < limited.len() {
-                    for (chunk_index, chunk) in limited[direct_count..]
-                        .chunks(settings.visible_rich_history_items)
-                        .enumerate()
-                    {
-                        let chunk_start =
-                            direct_count + (chunk_index * settings.visible_rich_history_items);
-                        let chunk_end = chunk_start + chunk.len();
-                        let title = format!("{} - {}", chunk_start + 1, chunk_end);
-                        let chunk_item = self.new_menu_item(&title);
-                        let chunk_menu = NSMenu::initWithTitle(
-                            NSMenu::alloc(self.mtm()),
-                            &NSString::from_str(&title),
-                        );
-                        self.configure_menu_appearance(&chunk_menu);
-                        chunk_menu.setDelegate(Some(ProtocolObject::from_ref(self)));
-                        for entry in chunk {
-                            self.add_rich_entry_item(&chunk_menu, entry, lang, settings.menu_width);
-                        }
-                        chunk_item.setSubmenu(Some(&chunk_menu));
-                        submenu.addItem(&chunk_item);
-                    }
-                }
+                self.add_rich_history_scroll_item(&submenu, &limited, lang, settings);
             }
         } else {
             self.add_disabled_item(&submenu, t(lang, "storage_unavailable"));
         }
 
+        *self.ivars().rich_history_menu.borrow_mut() = Some(submenu.clone());
         submenu_item.setSubmenu(Some(&submenu));
         menu.addItem(&submenu_item);
     }
 
-    fn add_rich_entry_item(
+    fn add_rich_history_scroll_item(
         &self,
         menu: &NSMenu,
+        entries: &[RichHistoryEntry],
+        lang: Language,
+        settings: AppSettings,
+    ) {
+        let visible_count = settings
+            .visible_rich_history_items
+            .max(1)
+            .min(entries.len());
+        let width = settings.menu_width as f64;
+        let visible_height = visible_count as f64 * RICH_MENU_ROW_HEIGHT;
+        let document_height = entries.len() as f64 * RICH_MENU_ROW_HEIGHT;
+
+        let scroll = NSScrollView::initWithFrame(
+            NSScrollView::alloc(self.mtm()),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, visible_height)),
+        );
+        scroll.setBorderType(NSBorderType::NoBorder);
+        scroll.setDrawsBackground(false);
+        scroll.setHasVerticalScroller(entries.len() > visible_count);
+        scroll.setHasHorizontalScroller(false);
+        scroll.setAutohidesScrollers(true);
+
+        let document_view = NSView::initWithFrame(
+            NSView::alloc(self.mtm()),
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(width, document_height.max(visible_height)),
+            ),
+        );
+
+        for (idx, entry) in entries.iter().enumerate() {
+            self.add_rich_history_row(
+                &document_view,
+                entry,
+                idx,
+                entries.len(),
+                lang,
+                settings.menu_width,
+            );
+        }
+
+        scroll.setDocumentView(Some(&document_view));
+        if document_height > visible_height {
+            document_view.scrollPoint(NSPoint::new(0.0, document_height - visible_height));
+        }
+
+        let item = self.new_menu_item("");
+        item.setView(Some(&scroll));
+        menu.addItem(&item);
+    }
+
+    fn add_rich_history_row(
+        &self,
+        view: &NSView,
         entry: &RichHistoryEntry,
+        idx: usize,
+        total_count: usize,
         lang: Language,
         menu_width: usize,
     ) {
+        let width = menu_width as f64;
+        let y = (total_count - idx - 1) as f64 * RICH_MENU_ROW_HEIGHT;
+        let title = self.rich_entry_title(entry, lang, menu_width);
+
+        let label = NSTextField::labelWithString(&NSString::from_str(&title), self.mtm());
+        label.setFrame(NSRect::new(
+            NSPoint::new(12.0, y + 3.0),
+            NSSize::new(width - 24.0, RICH_MENU_ROW_HEIGHT - 6.0),
+        ));
+        label.setFont(Some(&NSFont::menuFontOfSize(0.0)));
+        label.setTextColor(Some(&NSColor::labelColor()));
+        label.setUsesSingleLineMode(true);
+        label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        view.addSubview(&label);
+
+        let button = new_rich_history_row_button(
+            NSRect::new(
+                NSPoint::new(0.0, y),
+                NSSize::new(width, RICH_MENU_ROW_HEIGHT),
+            ),
+            entry.id as isize,
+            self,
+            self.mtm(),
+        );
+        unsafe {
+            button.setTarget(Some(as_any_object(self)));
+            button.setAction(Some(sel!(copyRichHistoryRow:)));
+        }
+        button.setButtonType(NSButtonType::MomentaryChange);
+        button.setBordered(false);
+        button.setTransparent(true);
+        button.setTag(entry.id as isize);
+        button.setToolTip(Some(&NSString::from_str(&entry.label)));
+        view.addSubview(&button);
+    }
+
+    fn rich_entry_title(
+        &self,
+        entry: &RichHistoryEntry,
+        lang: Language,
+        menu_width: usize,
+    ) -> String {
         let kind = match entry.kind {
             storage::RichClipboardKind::Image => t(lang, "kind_image"),
             storage::RichClipboardKind::File => t(lang, "kind_file"),
@@ -942,15 +1091,8 @@ impl MenuDelegate {
         }
         let prefix = format!("{kind}: ");
         let preview_width = preview_width_for_prefix(menu_width, &prefix);
-        let (label, truncated) = preview_with_truncation(&entry.label, preview_width);
-        let title = format!("{prefix}{label}");
-        self.add_action_item_with_tooltip(
-            menu,
-            &title,
-            sel!(copyRichHistoryItem:),
-            entry.id as isize,
-            truncated.then_some(entry.label.as_str()),
-        );
+        let (label, _) = preview_with_truncation(&entry.label, preview_width);
+        format!("{prefix}{label}")
     }
 
     fn ensure_preview_window(&self) -> (Retained<NSWindow>, Retained<NSImageView>) {
@@ -973,21 +1115,9 @@ impl MenuDelegate {
                 };
                 window.setLevel(NSPopUpMenuWindowLevel + 1);
                 window.setIgnoresMouseEvents(true);
-                window.setHasShadow(true);
+                window.setHasShadow(false);
                 window.setOpaque(false);
                 window.setBackgroundColor(Some(&NSColor::clearColor()));
-
-                let root =
-                    NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(self.mtm()), rect);
-                root.setMaterial(NSVisualEffectMaterial::HUDWindow);
-                root.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-                root.setState(NSVisualEffectState::Active);
-                root.setWantsLayer(true);
-                if let Some(layer) = root.layer() {
-                    layer.setCornerRadius(18.0);
-                    layer.setMasksToBounds(true);
-                }
-                window.setContentView(Some(&root));
                 window
             })
             .clone();
@@ -996,25 +1126,13 @@ impl MenuDelegate {
             .ivars()
             .preview_image_view
             .get_or_init(|| {
-                let inset = 16.0;
                 let rect = NSRect::new(
-                    NSPoint::new(inset, inset),
-                    NSSize::new(
-                        PREVIEW_PANEL_SIZE - inset * 2.0,
-                        PREVIEW_PANEL_SIZE - inset * 2.0,
-                    ),
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(PREVIEW_PANEL_SIZE, PREVIEW_PANEL_SIZE),
                 );
                 let view = NSImageView::initWithFrame(NSImageView::alloc(self.mtm()), rect);
                 view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
-                view.setWantsLayer(true);
-                if let Some(layer) = view.layer() {
-                    layer.setCornerRadius(12.0);
-                    layer.setMasksToBounds(true);
-                    layer.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
-                }
-                if let Some(content) = window.contentView() {
-                    content.addSubview(&view);
-                }
+                window.setContentView(Some(&view));
                 view
             })
             .clone();
@@ -1044,6 +1162,9 @@ impl MenuDelegate {
         };
 
         let (window, image_view) = self.ensure_preview_window();
+        let preview_size = fit_image_preview_size(image.size());
+        window.setFrame_display(NSRect::new(window.frame().origin, preview_size), false);
+        image_view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), preview_size));
         image_view.setImage(Some(&image));
         position_preview_window(
             &window,
@@ -2286,6 +2407,22 @@ fn preview_image_data(entry: &RichHistoryEntry) -> Option<Vec<u8>> {
     None
 }
 
+fn fit_image_preview_size(image_size: NSSize) -> NSSize {
+    if image_size.width <= 0.0 || image_size.height <= 0.0 {
+        return NSSize::new(PREVIEW_PANEL_SIZE, PREVIEW_PANEL_SIZE);
+    }
+    let max_edge = image_size.width.max(image_size.height);
+    let scale = if max_edge > PREVIEW_PANEL_SIZE {
+        PREVIEW_PANEL_SIZE / max_edge
+    } else {
+        1.0
+    };
+    NSSize::new(
+        (image_size.width * scale).ceil(),
+        (image_size.height * scale).ceil(),
+    )
+}
+
 /// 加载内嵌的 logo PNG，并按状态栏推荐的 18pt 高度生成模板图。
 /// 模板图（template image）会在 macOS 菜单栏中按当前主题自动渲染成
 /// 黑色（浅色菜单栏）或白色（深色菜单栏）的单色 logo。
@@ -2731,6 +2868,22 @@ mod tests {
             rect_intersection_area(NSRect::new(origin, size), avoid),
             0.0
         );
+    }
+
+    #[test]
+    fn image_preview_size_preserves_aspect_ratio() {
+        let size = fit_image_preview_size(NSSize::new(1200.0, 600.0));
+
+        assert_eq!(size.width, PREVIEW_PANEL_SIZE);
+        assert_eq!(size.height, PREVIEW_PANEL_SIZE / 2.0);
+    }
+
+    #[test]
+    fn image_preview_size_does_not_upscale_small_images() {
+        let size = fit_image_preview_size(NSSize::new(120.0, 80.0));
+
+        assert_eq!(size.width, 120.0);
+        assert_eq!(size.height, 80.0);
     }
 
     #[test]
