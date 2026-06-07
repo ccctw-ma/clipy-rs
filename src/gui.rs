@@ -10,15 +10,14 @@ use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBorderType, NSButton, NSButtonType,
-    NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate, NSEvent,
-    NSFloatingWindowLevel, NSFocusRingType, NSFont, NSFontAttributeName, NSImage, NSImageScaling,
-    NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSNormalWindowLevel,
-    NSPopUpButton, NSRunningApplication, NSScreen, NSScrollView, NSStatusBar, NSStatusItem,
-    NSStringDrawing, NSText, NSTextAlignment, NSTextField, NSTextFieldCell, NSTextFieldDelegate,
-    NSTextView, NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
-    NSWindowAnimationBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
-    NSWorkspace,
+    NSColor, NSControl, NSControlSize, NSControlTextEditingDelegate, NSEvent, NSFocusRingType,
+    NSFont, NSFontAttributeName, NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSNormalWindowLevel, NSPopUpButton, NSPopUpMenuWindowLevel,
+    NSRunningApplication, NSScreen, NSScrollView, NSStatusBar, NSStatusItem, NSStringDrawing,
+    NSText, NSTextAlignment, NSTextField, NSTextFieldCell, NSTextFieldDelegate, NSTextView,
+    NSVariableStatusItemLength, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowAnimationBehavior, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedStringKey, NSData, NSDictionary, NSNotification,
@@ -41,6 +40,7 @@ const SEARCH_PANEL_PADDING: f64 = 18.0;
 const SEARCH_ROW_HEIGHT: f64 = 42.0;
 const SEARCH_MAX_CANDIDATES: usize = 20;
 const PREVIEW_PANEL_SIZE: f64 = 360.0;
+const PREVIEW_MENU_GAP: f64 = 14.0;
 const PREFERENCES_PANEL_WIDTH: f64 = 560.0;
 const PREFERENCES_PANEL_HEIGHT: f64 = 362.0;
 const MENU_ITEM_HEIGHT_ESTIMATE: f64 = 22.0;
@@ -121,6 +121,7 @@ struct MenuDelegateIvars {
     preview_window: OnceCell<Retained<NSWindow>>,
     preview_image_view: OnceCell<Retained<NSImageView>>,
     image_previews: RefCell<std::collections::HashMap<isize, Vec<u8>>>,
+    active_popup_frame: Cell<Option<NSRect>>,
     preferences_window: RefCell<Option<Retained<NSWindow>>>,
     preferences_controls: RefCell<Option<PreferencesControls>>,
     search_window: OnceCell<Retained<NSWindow>>,
@@ -970,7 +971,7 @@ impl MenuDelegate {
                         false,
                     )
                 };
-                window.setLevel(NSFloatingWindowLevel);
+                window.setLevel(NSPopUpMenuWindowLevel + 1);
                 window.setIgnoresMouseEvents(true);
                 window.setHasShadow(true);
                 window.setOpaque(false);
@@ -1044,7 +1045,12 @@ impl MenuDelegate {
 
         let (window, image_view) = self.ensure_preview_window();
         image_view.setImage(Some(&image));
-        position_preview_window(&window, self.mtm());
+        position_preview_window(
+            &window,
+            self.mtm(),
+            self.ivars().active_popup_frame.get(),
+            self.settings().menu_width as f64,
+        );
         window.orderFront(None);
     }
 
@@ -1139,15 +1145,21 @@ impl MenuDelegate {
         let settings = self.settings();
         let popup_width = menu.size().width.max(settings.menu_width as f64);
         let mouse_location = NSEvent::mouseLocation();
-        let popup_location = adjusted_popup_location(
-            mouse_location,
-            menu.numberOfItems().max(0) as usize,
-            popup_width,
-            self.mtm(),
-        );
+        let menu_item_count = menu.numberOfItems().max(0) as usize;
+        let popup_location =
+            adjusted_popup_location(mouse_location, menu_item_count, popup_width, self.mtm());
+        let estimated_height = estimated_menu_height(menu_item_count);
+        self.ivars()
+            .active_popup_frame
+            .set(Some(menu_frame_from_popup_location(
+                popup_location,
+                popup_width,
+                estimated_height,
+            )));
         // A false return can simply mean the user dismissed the menu by clicking outside.
         // Do not fall back to the status bar menu, or it will reopen after dismissal.
         let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, popup_location, None);
+        self.ivars().active_popup_frame.set(None);
     }
 
     fn show_preferences_panel(&self) {
@@ -2211,9 +2223,19 @@ fn adjusted_popup_location(
     let Some(visible_frame) = visible_frame_for_point(location, mtm) else {
         return location;
     };
-    let estimated_height =
-        menu_item_count as f64 * MENU_ITEM_HEIGHT_ESTIMATE + MENU_VERTICAL_PADDING_ESTIMATE;
+    let estimated_height = estimated_menu_height(menu_item_count);
     adjusted_popup_location_for_frame(location, visible_frame, estimated_height, menu_width)
+}
+
+fn estimated_menu_height(menu_item_count: usize) -> f64 {
+    menu_item_count as f64 * MENU_ITEM_HEIGHT_ESTIMATE + MENU_VERTICAL_PADDING_ESTIMATE
+}
+
+fn menu_frame_from_popup_location(location: NSPoint, menu_width: f64, menu_height: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(location.x, location.y - menu_height),
+        NSSize::new(menu_width, menu_height),
+    )
 }
 
 fn adjusted_popup_location_for_frame(
@@ -2281,26 +2303,106 @@ fn load_status_bar_image() -> Option<Retained<NSImage>> {
     Some(image)
 }
 
-fn position_preview_window(window: &NSWindow, mtm: MainThreadMarker) {
+fn position_preview_window(
+    window: &NSWindow,
+    mtm: MainThreadMarker,
+    active_popup_frame: Option<NSRect>,
+    menu_width: f64,
+) {
     let mouse = NSEvent::mouseLocation();
     let frame = window.frame();
     let size = frame.size;
-    let mut origin = NSPoint::new(mouse.x + 16.0, mouse.y - size.height / 2.0);
     if let Some(visible) = visible_frame_for_point(mouse, mtm) {
-        if origin.x + size.width > visible.max().x {
-            origin.x = mouse.x - 16.0 - size.width;
+        let avoid_frame =
+            active_popup_frame.map(|frame| preview_avoid_frame_for_mouse(frame, mouse, menu_width));
+        let origin = preview_origin_for_frame(mouse, size, visible, avoid_frame);
+        window.setFrameOrigin(origin);
+    } else {
+        let origin = NSPoint::new(mouse.x + PREVIEW_MENU_GAP, mouse.y - size.height / 2.0);
+        window.setFrameOrigin(origin);
+    }
+}
+
+fn preview_avoid_frame_for_mouse(
+    root_menu_frame: NSRect,
+    mouse: NSPoint,
+    menu_width: f64,
+) -> NSRect {
+    let mut min_x = root_menu_frame.min().x;
+    let mut max_x = root_menu_frame.max().x;
+    if mouse.x < min_x {
+        min_x -= menu_width;
+    } else if mouse.x > max_x {
+        max_x += menu_width;
+    }
+    NSRect::new(
+        NSPoint::new(min_x, root_menu_frame.min().y),
+        NSSize::new(max_x - min_x, root_menu_frame.size.height),
+    )
+}
+
+fn preview_origin_for_frame(
+    anchor: NSPoint,
+    size: NSSize,
+    visible: NSRect,
+    avoid_frame: Option<NSRect>,
+) -> NSPoint {
+    let fallback = clamp_origin_to_visible(
+        NSPoint::new(anchor.x + PREVIEW_MENU_GAP, anchor.y - size.height / 2.0),
+        size,
+        visible,
+    );
+    let Some(avoid) = avoid_frame else {
+        return fallback;
+    };
+
+    let left_origin = NSPoint::new(
+        avoid.min().x - PREVIEW_MENU_GAP - size.width,
+        anchor.y - size.height / 2.0,
+    );
+    let right_origin = NSPoint::new(
+        avoid.max().x + PREVIEW_MENU_GAP,
+        anchor.y - size.height / 2.0,
+    );
+    let above_origin = NSPoint::new(
+        anchor.x - size.width / 2.0,
+        avoid.max().y + PREVIEW_MENU_GAP,
+    );
+    let below_origin = NSPoint::new(
+        anchor.x - size.width / 2.0,
+        avoid.min().y - PREVIEW_MENU_GAP - size.height,
+    );
+
+    let left_space = avoid.min().x - visible.min().x;
+    let right_space = visible.max().x - avoid.max().x;
+    let candidates = if right_space >= left_space {
+        [right_origin, left_origin, above_origin, below_origin]
+    } else {
+        [left_origin, right_origin, above_origin, below_origin]
+    };
+
+    let mut best_origin = fallback;
+    let mut best_score = f64::INFINITY;
+    for origin in candidates {
+        let clamped = clamp_origin_to_visible(origin, size, visible);
+        let preview_rect = NSRect::new(clamped, size);
+        let overlap = rect_intersection_area(preview_rect, avoid);
+        if overlap == 0.0 {
+            return clamped;
         }
-        if origin.x < visible.min().x {
-            origin.x = visible.min().x + MENU_SCREEN_MARGIN;
-        }
-        if origin.y < visible.min().y {
-            origin.y = visible.min().y + MENU_SCREEN_MARGIN;
-        }
-        if origin.y + size.height > visible.max().y {
-            origin.y = visible.max().y - size.height - MENU_SCREEN_MARGIN;
+        if overlap < best_score {
+            best_score = overlap;
+            best_origin = clamped;
         }
     }
-    window.setFrameOrigin(origin);
+
+    best_origin
+}
+
+fn rect_intersection_area(lhs: NSRect, rhs: NSRect) -> f64 {
+    let width = (lhs.max().x.min(rhs.max().x) - lhs.min().x.max(rhs.min().x)).max(0.0);
+    let height = (lhs.max().y.min(rhs.max().y) - lhs.min().y.max(rhs.min().y)).max(0.0);
+    width * height
 }
 
 fn position_search_window(window: &NSWindow, mtm: MainThreadMarker) {
@@ -2578,6 +2680,57 @@ mod tests {
         let adjusted = adjusted_popup_location_for_frame(location, visible, 220.0, menu_width);
 
         assert!(adjusted.x + menu_width <= visible.max().x - MENU_SCREEN_MARGIN);
+    }
+
+    #[test]
+    fn menu_frame_uses_popup_location_as_top_left() {
+        let location = NSPoint::new(420.0, 760.0);
+        let menu_frame = menu_frame_from_popup_location(location, 320.0, 220.0);
+
+        assert_eq!(menu_frame.min().x, 420.0);
+        assert_eq!(menu_frame.max().y, 760.0);
+        assert_eq!(menu_frame.size.width, 320.0);
+        assert_eq!(menu_frame.size.height, 220.0);
+    }
+
+    #[test]
+    fn preview_avoid_frame_extends_for_left_submenu() {
+        let root = frame(420.0, 120.0, 320.0, 520.0);
+        let mouse = NSPoint::new(240.0, 420.0);
+        let avoid = preview_avoid_frame_for_mouse(root, mouse, 320.0);
+
+        assert_eq!(avoid.min().x, 100.0);
+        assert_eq!(avoid.max().x, root.max().x);
+    }
+
+    #[test]
+    fn preview_origin_prefers_right_of_menu_when_space_allows() {
+        let visible = frame(0.0, 0.0, 1440.0, 900.0);
+        let avoid = frame(200.0, 100.0, 300.0, 500.0);
+        let size = NSSize::new(360.0, 360.0);
+        let origin =
+            preview_origin_for_frame(NSPoint::new(300.0, 360.0), size, visible, Some(avoid));
+
+        assert!(origin.x >= avoid.max().x + PREVIEW_MENU_GAP);
+        assert_eq!(
+            rect_intersection_area(NSRect::new(origin, size), avoid),
+            0.0
+        );
+    }
+
+    #[test]
+    fn preview_origin_uses_vertical_space_when_horizontal_space_is_tight() {
+        let visible = frame(0.0, 0.0, 800.0, 900.0);
+        let avoid = frame(220.0, 220.0, 360.0, 260.0);
+        let size = NSSize::new(360.0, 360.0);
+        let origin =
+            preview_origin_for_frame(NSPoint::new(400.0, 360.0), size, visible, Some(avoid));
+
+        assert!(origin.y >= avoid.max().y + PREVIEW_MENU_GAP);
+        assert_eq!(
+            rect_intersection_area(NSRect::new(origin, size), avoid),
+            0.0
+        );
     }
 
     #[test]
