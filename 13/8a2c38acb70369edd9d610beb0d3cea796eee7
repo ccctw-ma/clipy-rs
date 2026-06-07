@@ -1,0 +1,189 @@
+src/gui.rs
+  bd53496102431d47 13-20,43,124,974,1048-1053,1148-1158,1162,2226,2230-2240,2306-2311,2316-2391,2393-2395,2398-2405,2685-2735 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a25297905cb1433dde48df5","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[13,20]},{"Single":43},{"Single":124},{"Single":974},{"Range":[1048,1053]},{"Range":[1148,1158]},{"Single":1162},{"Single":2226},{"Range":[2230,2240]},{"Range":[2306,2311]},{"Range":[2316,2391]},{"Range":[2393,2395]},{"Range":[2398,2405]},{"Range":[2685,2735]}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "138a2c38acb70369edd9d610beb0d3cea796eee7",
+  "prompts": {
+    "bd53496102431d47": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a25282e05cb1433dde48c56",
+        "model": "gpt-5.5__dev"
+      },
+      "human_author": "mashichen <mashichen.msc@bytedance.com>",
+      "messages": [],
+      "total_additions": 201,
+      "total_deletions": 48,
+      "accepted_lines": 185,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "src/gui.rs": [
+      {
+        "hash": "bd53496102431d47",
+        "line_ranges": [
+          {
+            "Range": [
+              13,
+              20
+            ]
+          },
+          {
+            "Single": 43
+          },
+          {
+            "Single": 124
+          },
+          {
+            "Single": 974
+          },
+          {
+            "Range": [
+              1048,
+              1053
+            ]
+          },
+          {
+            "Range": [
+              1148,
+              1158
+            ]
+          },
+          {
+            "Single": 1162
+          },
+          {
+            "Single": 2226
+          },
+          {
+            "Range": [
+              2230,
+              2240
+            ]
+          },
+          {
+            "Range": [
+              2306,
+              2311
+            ]
+          },
+          {
+            "Range": [
+              2316,
+              2391
+            ]
+          },
+          {
+            "Range": [
+              2393,
+              2395
+            ]
+          },
+          {
+            "Range": [
+              2398,
+              2405
+            ]
+          },
+          {
+            "Range": [
+              2685,
+              2735
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a25297905cb1433dde48df5",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  13,
+                  20
+                ]
+              },
+              {
+                "Single": 43
+              },
+              {
+                "Single": 124
+              },
+              {
+                "Single": 974
+              },
+              {
+                "Range": [
+                  1048,
+                  1053
+                ]
+              },
+              {
+                "Range": [
+                  1148,
+                  1158
+                ]
+              },
+              {
+                "Single": 1162
+              },
+              {
+                "Single": 2226
+              },
+              {
+                "Range": [
+                  2230,
+                  2240
+                ]
+              },
+              {
+                "Range": [
+                  2306,
+                  2311
+                ]
+              },
+              {
+                "Range": [
+                  2316,
+                  2391
+                ]
+              },
+              {
+                "Range": [
+                  2393,
+                  2395
+                ]
+              },
+              {
+                "Range": [
+                  2398,
+                  2405
+                ]
+              },
+              {
+                "Range": [
+                  2685,
+                  2735
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "bd53496102431d47": {
+      "tool": "trae",
+      "conversation_id": "6a25282e05cb1433dde48c56",
+      "session_id": "6a25282e05cb1433dde48c56",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
