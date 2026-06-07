@@ -124,7 +124,6 @@ struct MenuDelegateIvars {
     preview_image_view: OnceCell<Retained<NSImageView>>,
     image_previews: RefCell<std::collections::HashMap<isize, Vec<u8>>>,
     active_popup_frame: Cell<Option<NSRect>>,
-    rich_history_menu: RefCell<Option<Retained<NSMenu>>>,
     preferences_window: RefCell<Option<Retained<NSWindow>>>,
     preferences_controls: RefCell<Option<PreferencesControls>>,
     search_window: OnceCell<Retained<NSWindow>>,
@@ -157,7 +156,6 @@ define_class!(
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, _menu: &NSMenu) {
             self.hide_image_preview();
-            *self.ivars().rich_history_menu.borrow_mut() = None;
         }
     }
 
@@ -220,8 +218,8 @@ define_class!(
         }
 
         #[unsafe(method(copyRichHistoryRow:))]
-        fn copy_rich_history_row(&self, sender: &NSButton) {
-            self.close_rich_history_menu();
+        fn copy_rich_history_row(&self, sender: &RichHistoryRowButton) {
+            self.close_rich_history_menu(sender.ivars().menu.get());
             self.copy_rich_history_id(sender.tag());
         }
 
@@ -430,6 +428,7 @@ define_class!(
 #[derive(Default)]
 struct RichHistoryRowButtonIvars {
     delegate: Cell<*const MenuDelegate>,
+    menu: Cell<*const NSMenu>,
     preview_tag: Cell<isize>,
 }
 
@@ -475,11 +474,13 @@ fn center_rect_vertically(cell: &CenteredTextFieldCell, rect: NSRect) -> NSRect 
 fn new_rich_history_row_button(
     frame: NSRect,
     preview_tag: isize,
+    menu: &NSMenu,
     delegate: &MenuDelegate,
     mtm: MainThreadMarker,
 ) -> Retained<RichHistoryRowButton> {
     let button = RichHistoryRowButton::alloc(mtm).set_ivars(RichHistoryRowButtonIvars {
         delegate: Cell::new(delegate as *const MenuDelegate),
+        menu: Cell::new(menu as *const NSMenu),
         preview_tag: Cell::new(preview_tag),
     });
     let button: Retained<RichHistoryRowButton> =
@@ -521,10 +522,9 @@ impl MenuDelegate {
         self.rebuild_menu();
     }
 
-    fn close_rich_history_menu(&self) {
-        let menu = self.ivars().rich_history_menu.borrow().clone();
-        if let Some(menu) = menu {
-            menu.cancelTrackingWithoutAnimation();
+    fn close_rich_history_menu(&self, menu: *const NSMenu) {
+        if !menu.is_null() {
+            unsafe { &*menu }.cancelTrackingWithoutAnimation();
         }
         self.hide_image_preview();
     }
@@ -762,7 +762,7 @@ impl MenuDelegate {
         menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
         self.add_action_item(menu, t(lang, "search_history"), sel!(openSearchPanel:), 0);
         self.add_favorites_menu(menu, lang);
-        self.add_rich_history_menu(menu, lang);
+        self.add_rich_history_menus(menu, lang);
         menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
 
         self.add_action_item(menu, t(lang, "preferences"), sel!(openPreferences:), 0);
@@ -941,33 +941,59 @@ impl MenuDelegate {
         );
     }
 
-    fn add_rich_history_menu(&self, menu: &NSMenu, lang: Language) {
+    fn add_rich_history_menus(&self, menu: &NSMenu, lang: Language) {
         let settings = self.settings();
-        let submenu_item = self.new_menu_item(t(lang, "rich_history"));
-        let submenu = NSMenu::initWithTitle(
-            NSMenu::alloc(self.mtm()),
-            &NSString::from_str(t(lang, "rich_history")),
-        );
-        self.configure_menu_appearance(&submenu);
-        submenu.setDelegate(Some(ProtocolObject::from_ref(self)));
         self.ivars().image_previews.borrow_mut().clear();
 
         if let Some(store) = self.store() {
             let entries = sorted_rich_history(store.load_rich_history().unwrap_or_default());
-            let limited = entries
-                .into_iter()
-                .take(settings.max_rich_history_items)
-                .collect::<Vec<_>>();
-            if limited.is_empty() {
-                self.add_disabled_item(&submenu, t(lang, "no_rich_history"));
-            } else {
-                self.add_rich_history_scroll_item(&submenu, &limited, lang, settings);
-            }
+            self.add_rich_history_kind_menu(
+                menu,
+                &entries,
+                storage::RichClipboardKind::Image,
+                t(lang, "images"),
+                t(lang, "no_images"),
+                &settings,
+            );
+            self.add_rich_history_kind_menu(
+                menu,
+                &entries,
+                storage::RichClipboardKind::File,
+                t(lang, "files"),
+                t(lang, "no_files"),
+                &settings,
+            );
         } else {
-            self.add_disabled_item(&submenu, t(lang, "storage_unavailable"));
+            self.add_disabled_item(menu, t(lang, "storage_unavailable"));
+        }
+    }
+
+    fn add_rich_history_kind_menu(
+        &self,
+        menu: &NSMenu,
+        entries: &[RichHistoryEntry],
+        kind: storage::RichClipboardKind,
+        title: &str,
+        empty_title: &str,
+        settings: &AppSettings,
+    ) {
+        let submenu_item = self.new_menu_item(title);
+        let submenu = NSMenu::initWithTitle(NSMenu::alloc(self.mtm()), &NSString::from_str(title));
+        self.configure_menu_appearance(&submenu);
+        submenu.setDelegate(Some(ProtocolObject::from_ref(self)));
+
+        let limited = entries
+            .iter()
+            .filter(|entry| entry.kind == kind)
+            .take(settings.max_rich_history_items)
+            .cloned()
+            .collect::<Vec<_>>();
+        if limited.is_empty() {
+            self.add_disabled_item(&submenu, empty_title);
+        } else {
+            self.add_rich_history_scroll_item(&submenu, &limited, settings);
         }
 
-        *self.ivars().rich_history_menu.borrow_mut() = Some(submenu.clone());
         submenu_item.setSubmenu(Some(&submenu));
         menu.addItem(&submenu_item);
     }
@@ -976,8 +1002,7 @@ impl MenuDelegate {
         &self,
         menu: &NSMenu,
         entries: &[RichHistoryEntry],
-        lang: Language,
-        settings: AppSettings,
+        settings: &AppSettings,
     ) {
         let visible_count = settings
             .visible_rich_history_items
@@ -1007,11 +1032,11 @@ impl MenuDelegate {
 
         for (idx, entry) in entries.iter().enumerate() {
             self.add_rich_history_row(
+                menu,
                 &document_view,
                 entry,
                 idx,
                 entries.len(),
-                lang,
                 settings.menu_width,
             );
         }
@@ -1028,16 +1053,16 @@ impl MenuDelegate {
 
     fn add_rich_history_row(
         &self,
+        menu: &NSMenu,
         view: &NSView,
         entry: &RichHistoryEntry,
         idx: usize,
         total_count: usize,
-        lang: Language,
         menu_width: usize,
     ) {
         let width = menu_width as f64;
         let y = (total_count - idx - 1) as f64 * RICH_MENU_ROW_HEIGHT;
-        let title = self.rich_entry_title(entry, lang, menu_width);
+        let title = self.rich_entry_title(entry, menu_width);
 
         let label = NSTextField::labelWithString(&NSString::from_str(&title), self.mtm());
         label.setFrame(NSRect::new(
@@ -1056,6 +1081,7 @@ impl MenuDelegate {
                 NSSize::new(width, RICH_MENU_ROW_HEIGHT),
             ),
             entry.id as isize,
+            menu,
             self,
             self.mtm(),
         );
@@ -1071,16 +1097,7 @@ impl MenuDelegate {
         view.addSubview(&button);
     }
 
-    fn rich_entry_title(
-        &self,
-        entry: &RichHistoryEntry,
-        lang: Language,
-        menu_width: usize,
-    ) -> String {
-        let kind = match entry.kind {
-            storage::RichClipboardKind::Image => t(lang, "kind_image"),
-            storage::RichClipboardKind::File => t(lang, "kind_file"),
-        };
+    fn rich_entry_title(&self, entry: &RichHistoryEntry, menu_width: usize) -> String {
         if entry.kind == storage::RichClipboardKind::Image
             && let Some(data) = preview_image_data(entry)
         {
@@ -1089,10 +1106,9 @@ impl MenuDelegate {
                 .borrow_mut()
                 .insert(entry.id as isize, data);
         }
-        let prefix = format!("{kind}: ");
-        let preview_width = preview_width_for_prefix(menu_width, &prefix);
+        let preview_width = title_width_for_menu(menu_width);
         let (label, _) = preview_with_truncation(&entry.label, preview_width);
-        format!("{prefix}{label}")
+        label
     }
 
     fn ensure_preview_window(&self) -> (Retained<NSWindow>, Retained<NSImageView>) {
@@ -2510,13 +2526,7 @@ fn preview_origin_for_frame(
         avoid.min().y - PREVIEW_MENU_GAP - size.height,
     );
 
-    let left_space = avoid.min().x - visible.min().x;
-    let right_space = visible.max().x - avoid.max().x;
-    let candidates = if right_space >= left_space {
-        [right_origin, left_origin, above_origin, below_origin]
-    } else {
-        [left_origin, right_origin, above_origin, below_origin]
-    };
+    let candidates = [right_origin, left_origin, above_origin, below_origin];
 
     let mut best_origin = fallback;
     let mut best_score = f64::INFINITY;
@@ -2647,7 +2657,11 @@ fn t(language: Language, key: &str) -> &'static str {
             "save" => "Save",
             "cancel" => "Cancel",
             "rich_history" => "Images and Files",
+            "images" => "Images",
+            "files" => "Files",
             "no_rich_history" => "No images or files yet",
+            "no_images" => "No images yet",
+            "no_files" => "No files yet",
             "kind_image" => "Image",
             "kind_file" => "File",
             "favorites" => "Favorites",
@@ -2695,7 +2709,11 @@ fn t(language: Language, key: &str) -> &'static str {
             "save" => "保存",
             "cancel" => "取消",
             "rich_history" => "图片和文件",
+            "images" => "图片",
+            "files" => "文件",
             "no_rich_history" => "暂无图片或文件",
+            "no_images" => "暂无图片",
+            "no_files" => "暂无文件",
             "kind_image" => "图片",
             "kind_file" => "文件",
             "favorites" => "收藏",
@@ -2847,6 +2865,21 @@ mod tests {
         let size = NSSize::new(360.0, 360.0);
         let origin =
             preview_origin_for_frame(NSPoint::new(300.0, 360.0), size, visible, Some(avoid));
+
+        assert!(origin.x >= avoid.max().x + PREVIEW_MENU_GAP);
+        assert_eq!(
+            rect_intersection_area(NSRect::new(origin, size), avoid),
+            0.0
+        );
+    }
+
+    #[test]
+    fn preview_origin_prefers_right_even_when_left_has_more_space() {
+        let visible = frame(0.0, 0.0, 1440.0, 900.0);
+        let avoid = frame(900.0, 100.0, 180.0, 500.0);
+        let size = NSSize::new(320.0, 320.0);
+        let origin =
+            preview_origin_for_frame(NSPoint::new(980.0, 360.0), size, visible, Some(avoid));
 
         assert!(origin.x >= avoid.max().x + PREVIEW_MENU_GAP);
         assert_eq!(
